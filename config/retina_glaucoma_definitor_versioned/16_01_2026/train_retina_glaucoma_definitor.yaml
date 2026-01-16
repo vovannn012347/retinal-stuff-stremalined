@@ -1,0 +1,69 @@
+random_seed: False # options: False | <int>
+# dataloading
+# for simplicity clache is pre-applied
+dataset_path: 'C:/Users/User/PycharmProjects/retinal-stuff/training-data/preprocess-output/histogram-hsv-s-clache-lab-no-inpaint'
+mask_folder_path: 'c:/Users/User/PycharmProjects/retinal-stuff/training-data/retina-stuff-definitor/training-masks'
+
+scan_subdirs: false  # Are the images organized in subfolders?
+random_crop: False  # Set to false when dataset is 'celebahq', meaning only resize the images to img_shapes, instead of crop img_shapes from a larger raw image. This is useful when you train on images with different resolutions like places2. In these cases, please set random_crop to true.
+batch_size: 4
+k_folds: 10
+num_workers: 0
+num_epoch: 1500 # of training set reruns
+
+#image sizing
+img_shapes: [576, 576, 3]
+
+# training
+log_dir: 'C:/Users/User/PycharmProjects/retinal-stuff/training-data/retina-stuff-definitor/for-display/x64_quant/logs' # logging folder
+checkpoint_dir: 'C:/Users/User/PycharmProjects/retinal-stuff/training-data/retina-stuff-definitor/for-display/x64_quant/checkpoints' # Checkpoint folder
+
+# training
+# resume training
+# Empty to start new training
+# if no training file present at path - new training starts
+model_restore: 'c:/Users/User/PycharmProjects/retinal-stuff/training-data/retina-stuff-definitor/for-display/x64/checkpoints/states.pth'
+# model_restore: ''
+
+learning_base: 64 # 8 # 16 # 32 # 64
+use_dropout: False   #used to init dropout
+dropout_probability: 0.3
+loading_dropout_from_norm: False   #to reinit optimizer if save-load is iccorect
+reinit_optimizer: True   #to reinit optimizer when training starts
+prunning_restore: False   # when loading from prunned model
+prunning_percent: False # 0.5    # prunning percent
+
+quantize_epochs: 5
+quantization:
+  activation_dtype: quint8 # quint8 qint8 float16
+  weight_dtype: qint8 # qint8 quint8 qint4
+  activation_qscheme: per_tensor_affine # per_tensor_affine per_tensor_symmetric
+  weight_qscheme: per_tensor_affine # per_tensor_affine per_channel_affine
+  observer:
+    activation_observer: MovingAverageMinMaxObserver # MinMaxObserver MovingAverageMinMaxObserver PerChannelMinMaxObserver
+    weight_observer: MovingAverageMinMaxObserver # MinMaxObserver MovingAverageMinMaxObserver PerChannelMinMaxObserver
+  qat:
+    use_qat: True # set to true to turn on quantization saving
+    qat_algorithm: fbgemm # unused
+
+weight_share: False
+
+use_cuda_if_available: True
+
+opt_lr: 0.000025    # lr for Adam optimizer (generator) 0.00015 for x32
+opt_beta1: 0.9    # beta1 for Adam optimizer (generator)
+opt_beta2: 0.999  # beta2 for Adam optimizer (generator)
+weight_decay: 0 # 0.0000000001 # regularization weight
+
+
+# if optional: set to False to deactivate
+display_iter: 6           # display dummy processing results
+log_loss: True           # write losses to console and log
+log_debug: False          # write debug info about changes and gradients to console
+print_iter: 1           # display largest weight images
+save_checkpoint_iter: 1   # save checkpoint file and overwrite last one
+save_imgs_to_disc_iter: 1 # (optional) save image grids in checkpoint folder
+save_cp_backup_iter: 10   # (optional) save checkpoint file named states_{n_iter}.pth
+
+# loss
+gan_loss: 'wbce' # options: 'wbce', 'bce', 'avg'
