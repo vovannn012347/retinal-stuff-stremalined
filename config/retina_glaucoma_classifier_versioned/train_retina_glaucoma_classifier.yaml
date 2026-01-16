@@ -1,0 +1,48 @@
+random_seed: False # options: False | <int>
+
+# dataloading
+dataset_path_correct: 'artifacts/retina_nerve_classifier/x64/nerves_defined_output_correct_selection1'
+dataset_path_iccorrect: 'artifacts/retina_nerve_classifier/x64/nerves_defined_output_iccorect'
+label_folder_path: 'artifacts/retina_nerve_classifier/x64/nerve_defined_labels'
+
+# training
+# resume training
+# Empty to start new training
+model_restore: 'artifacts/retina-stuff-classifier/for-display/x64/checkpoints/states.pth'
+
+# training
+log_dir: 'training-data/retina-stuff-classifier/for-display/x64/checkpoints/logs' # logging folder
+checkpoint_dir: 'training-data/retina-stuff-classifier/for-display/x64/checkpoints' # Checkpoint folder
+
+
+data_labels_ordered: ['glaucoma', 'atrophy', 'valid_image']
+data_label_correct: 'valid_image'
+
+scan_subdirs: false  # Are the images organized in subfolders?
+random_crop: False  # Set to false when dataset is 'celebahq', meaning only resize the images to img_shapes, instead of crop img_shapes from a larger raw image. This is useful when you train on images with different resolutions like places2. In these cases, please set random_crop to true.
+batch_size: 4
+k_folds: 10
+num_workers: 0
+num_epoch: 1500 # of training set reruns
+
+#image sizing
+img_shapes: [128, 128, 3]
+
+use_cuda_if_available: True
+
+opt_lr: 0.0001    # lr for Adam optimizer (generator)
+opt_beta1: 0.9    # beta1 for Adam optimizer (generator)
+opt_beta2: 0.999  # beta2 for Adam optimizer (generator)
+weight_decay: 0 #0.00000001    # regularization weight
+
+# if optional: set to False to deactivate
+display_iter: 6           # display dummy processing results
+log_loss: True           # write losses to console and log
+log_debug: False          # write debug info about changes and gradients to console
+print_iter: 1           # display largest weight images
+save_checkpoint_iter: 1   # save checkpoint file and overwrite last one
+save_imgs_to_disc_iter: 1 # (optional) save image grids in checkpoint folder
+save_cp_backup_iter: 10   # (optional) save checkpoint file named states_{n_iter}.pth
+
+# loss
+gan_loss: 'wbce' # options: 'wbce', 'avg'

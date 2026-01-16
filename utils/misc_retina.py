@@ -68,14 +68,6 @@ def save_2_convolution_states(fname, convolution_pass1, convolution_pass2, optim
     print("Saved state dicts!")
 
 
-def save_2_convolution_states_2(fname, convolution_pass, optimizer_pass, n_iter, config):
-    state_dicts = {'convolution_pass': convolution_pass.state_dict(),
-                   'adam_opt_pass': optimizer_pass.state_dict(),
-                   'n_iter': n_iter}
-    torch.save(state_dicts, f"{config.checkpoint_dir}/{fname}")
-    print("Saved state dicts!")
-
-
 def save_nerve_classifier(fname, nerve_classifier_pass, optimizer, n_iter, config):
     state_dicts = {'nerve_classifier': nerve_classifier_pass.state_dict(),
                    'adam_opt_nerve_classifier': optimizer.state_dict(),
@@ -751,6 +743,7 @@ def quantize_model(model, quantization_type='dynamic', dtype=torch.qint8, layers
         raise ValueError("quantization_type must be either 'dynamic' or 'static'")
 
     return quantized_model
+
 
 def k_means_clustering(weights, num_clusters=8, max_iters=100):
     """

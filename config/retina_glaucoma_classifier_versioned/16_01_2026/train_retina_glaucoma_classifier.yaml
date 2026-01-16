@@ -1,48 +1,92 @@
-random_seed: False # options: False | <int>
-# dataloading
+# train_retina_glaucoma_classifier_pruning.yaml
+# Conservative gradual channel pruning – higher chance of preserving performance
+# Target path: 64 → 56 → 48 → 40 → 32 → 28 → 24 → 20 (~12–20% original params)
+# Date: 16.01.2026
 
-dataset_path_correct: 'training-data/retina-stuff-classifier/for-display/x64/nerves_defined_output_correct_selection1'
-dataset_path_iccorrect: 'training-data/retina-stuff-classifier/for-display/x64/nerves_defined_output_iccorect'
-label_folder_path: 'training-data/retina-stuff-classifier/for-display/x64/nerve_defined_labels'
-
-data_labels_ordered: ['glaucoma', 'atrophy', 'valid_image']
-data_label_correct: 'valid_image'
-
-scan_subdirs: false  # Are the images organized in subfolders?
-random_crop: False  # Set to false when dataset is 'celebahq', meaning only resize the images to img_shapes, instead of crop img_shapes from a larger raw image. This is useful when you train on images with different resolutions like places2. In these cases, please set random_crop to true.
-batch_size: 4
-k_folds: 10
-num_workers: 0
-num_epoch: 1500 # of training set reruns
-
-#image sizing
-img_shapes: [128, 128, 3]
-
-# training
-# resume training
-# Empty to start new training
-model_restore: 'training-data/retina-stuff-classifier/for-display/x64/checkpoints/states.pth'
-#model_restore: ''
-
-# training
-log_dir: 'training-data/retina-stuff-classifier/for-display/x64/checkpoints/logs' # logging folder
-checkpoint_dir: 'training-data/retina-stuff-classifier/for-display/x64/checkpoints' # Checkpoint folder
-
+# ────────────────────────────────────────────────────────────────────────────────
+#  General settings
+# ────────────────────────────────────────────────────────────────────────────────
+random_seed: False
 use_cuda_if_available: True
 
-opt_lr: 0.0001    # lr for Adam optimizer (generator)
-opt_beta1: 0.9    # beta1 for Adam optimizer (generator)
-opt_beta2: 0.999  # beta2 for Adam optimizer (generator)
-weight_decay: 0 #0.00000001    # regularization weight
+# ────────────────────────────────────────────────────────────────────────────────
+#  Dataset & Data Loading
+# ────────────────────────────────────────────────────────────────────────────────
+dataset_path:   'artifacts/retina_nerve_classifier/x64/nerves_defined_output_correct_selection'
+dataset_labels_path: 'artifacts/retina_nerve_classifier/x64/nerves_defined_output_correct_selection'
 
-# if optional: set to False to deactivate
-display_iter: 6           # display dummy processing results
-log_loss: True           # write losses to console and log
-log_debug: False          # write debug info about changes and gradients to console
-print_iter: 1           # display largest weight images
-save_checkpoint_iter: 1   # save checkpoint file and overwrite last one
-save_imgs_to_disc_iter: 1 # (optional) save image grids in checkpoint folder
-save_cp_backup_iter: 10   # (optional) save checkpoint file named states_{n_iter}.pth
+data_labels_ordered: ['glaucoma', 'atrophy', 'valid_image']
+data_label_correct:  'valid_image'
 
-# loss
-gan_loss: 'wbce' # options: 'wbce', 'avg'
+scan_subdirs: True            # includes subdir matching
+batch_size: 12
+num_workers: 4
+img_shapes: [128, 128, 3]
+
+# ────────────────────────────────────────────────────────────────────────────────
+#  Training Hyperparameters
+# ────────────────────────────────────────────────────────────────────────────────
+num_epoch: 1600                   # still long, but less extreme than 1800–2000
+
+opt_lr:         0.0001
+opt_beta1:      0.9
+opt_beta2:      0.999
+weight_decay:   0 # 0.00001
+
+# ────────────────────────────────────────────────────────────────────────────────
+#  Dropout Schedule
+# ────────────────────────────────────────────────────────────────────────────────
+dropout:
+  enabled:              true
+  start_value:          0.06
+  max_value:            0.45        # 0.45 is usually safer than 0.50
+  ramp_up_start_epoch:  200
+  ramp_up_over_epochs:  300         # very slow ramp → 0.13% per epoch
+  ramp_up_strategy:     'linear'
+
+# ────────────────────────────────────────────────────────────────────────────────
+#  Pruning Settings – STRUCTURED CHANNEL PRUNING
+# ────────────────────────────────────────────────────────────────────────────────
+pruning:
+  enabled:                    true
+  start_after_epoch:          480                       # after strong dropout stabilization
+  prune_every_epochs:         160                       # longer intervals, more recovery time
+  prune_amount_per_step:      0.125                     # ≈12–13% reduction of current width
+  target_channel_multipliers:                           # conservative sequence
+    - 56
+    - 48
+    - 40
+    - 32
+    - 28
+    - 24
+    - 20
+  min_channel_ratio:          0.18                      # never go below ~18% of original
+  recovery_epochs_per_step:   [100, 130, 160, 200, 240, 280, 340]
+  lr_scale_after_prune:       0.45                      # reduce LR ≈55% after each prune
+  use_lr_restart:             true
+
+# ────────────────────────────────────────────────────────────────────────────────
+#  Augmentation & Regularization
+# ────────────────────────────────────────────────────────────────────────────────
+augmentation:
+  mixup_alpha:              0.0          # disabled - too diverse target regions
+  cutmix_alpha:             0.0          # disabled - same reason
+  randaug_magnitude:        9            # moderate to strong RandAugment (6–11 is typical sweet spot)
+  auto_augment:             false        # disabled - too complex / unpredictable for this task
+  label_smoothing:          0.05         # reasonable value, 0.08–0.12 usually works well here
+
+# ────────────────────────────────────────────────────────────────────────────────
+#  Logging & Checkpointing
+# ────────────────────────────────────────────────────────────────────────────────
+checkpoint_dir: 'artifacts/retina_nerve_classifier/x64/checkpoints/16_01_2026_conservative_pruning'
+log_dir:        'artifacts/retina_nerve_classifier/x64/checkpoints/16_01_2026_conservative_pruning/logs'
+
+model_restore: 'artifacts/retina_nerve_classifier/x64/checkpoints/states_51.pth'
+
+display_iter:           30
+log_loss:               true
+log_debug:              true
+print_iter:             5
+save_checkpoint_iter:   5
+save_cp_backup_iter:    80
+save_imgs_to_disc_iter: 40

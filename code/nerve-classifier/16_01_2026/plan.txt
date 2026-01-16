@@ -1,0 +1,9 @@
+Phase / period                     Epoch range       Dropout        Action / goal                              Recovery length
+──────────────────────────────────  ─────────────────  ─────────────  ─────────────────────────────────────────  ───────────────────
+0. Warm-up & basic learning         0 … ~180–250      very low       learn good features without strong reg     —
+1. Gradual strong dropout           ~200 … ~500       0.05 → 0.45    prepare model for pruning                  250–300 epochs
+2. First pruning wave               ~480–520          ~0.40–0.45     64 → 56–52 base                            100–140 epochs
+3. Second pruning wave              ~620–660          0.42–0.45      56 → 44–40 base                            140–180 epochs
+4. Third pruning wave               ~800–850          0.43–0.45      44 → 32–36 base                            180–240 epochs
+5. Fourth (optional)                ~1050–1100        0.44–0.45      36 → 28–24 base                            220–300+ epochs
+6. Final long stabilization         until convergence  0.45–0.48      maximum recovery + evaluation              300+ epochs
