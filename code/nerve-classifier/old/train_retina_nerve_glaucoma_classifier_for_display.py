@@ -1,11 +1,12 @@
 import os
 import time
 
-import utils.misc_retina as misc
-from model.retina_classifier_networks import WeightedBCELoss, HandmadeGlaucomaClassifier, FourMetrics
-from utils.retinaldata import ImageMaskDataset, ImageResultsDataset
 from torch.utils.data import DataLoader, Subset, Dataset
 from sklearn.model_selection import KFold
+
+import utils.misc_retina as misc
+from utils.retinaldata import ImageMaskDataset, ImageResultsDataset
+from model.retina_classifier_networks import WeightedBCELoss, HandmadeGlaucomaClassifier, FourMetrics
 
 import argparse
 import torch.nn as nn

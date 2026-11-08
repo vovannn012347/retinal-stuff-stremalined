@@ -11,15 +11,20 @@ import os
 
 
 class DictConfig(object):
-    """Creates a Config object from a dict
-       such that object attributes correspond to dict keys.
     """
-
+    Creates a Config object from a dict such that object attributes
+    correspond to dict keys, recursively.
+    """
     def __init__(self, config_dict):
-        self.__dict__.update(config_dict)
+        for key, value in config_dict.items():
+            if isinstance(value, dict):
+                # Recursively wrap nested dictionaries
+                setattr(self, key, DictConfig(value))
+            else:
+                setattr(self, key, value)
 
     def __str__(self):
-        return '\n'.join(f"{key}: {val}" for key, val in self.__dict__.items())
+        return str(self.__dict__)
 
     def __repr__(self):
         return self.__str__()
@@ -32,7 +37,7 @@ def get_config(fname):
     resolved_path = os.path.abspath(fname)
     print("Resolved path:", resolved_path)
 
-    with open(fname, 'r') as stream:
+    with open(resolved_path, 'r') as stream:
         config_dict = yaml.load(stream, Loader)
     config = DictConfig(config_dict)
     return config

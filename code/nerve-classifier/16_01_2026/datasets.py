@@ -22,8 +22,8 @@ class ImageResultsDataset(Dataset):
 
     def __init__(self,
                  folder_path: str,  # path with images
-                 data_folder_path: str,  # path with per-image .csv labels
-                 data_label_ordering: list,  # ['glaucoma', 'atrophy', 'valid_image']
+                 label_folder_path: str,  # path with per-image .csv labels
+                 label_ordering: list,  # ['glaucoma', 'atrophy', 'valid_image']
                  img_shape: list,  # [W, H, C] e.g. [128, 128, 3]
                  label_correct: str = '',  # optional: name of correctness label to override
                  scan_subdirs: bool = False,
@@ -32,8 +32,8 @@ class ImageResultsDataset(Dataset):
         super().__init__()
 
         self.folder_path = folder_path
-        self.data_folder_path = data_folder_path
-        self.data_label_ordering = data_label_ordering
+        self.data_folder_path = label_folder_path
+        self.data_label_ordering = label_ordering
         self.img_shape = img_shape
         self.label_correct = label_correct
         self.scan_subdirs = scan_subdirs
@@ -42,8 +42,8 @@ class ImageResultsDataset(Dataset):
 
         # If label_correct is given, remember its index in ordering
         self.label_correct_index = -1
-        if label_correct and label_correct in data_label_ordering:
-            self.label_correct_index = data_label_ordering.index(label_correct)
+        if label_correct and label_correct in label_ordering:
+            self.label_correct_index = label_ordering.index(label_correct)
 
         # Collect image paths + corresponding label csv paths
         self.samples = self._collect_samples()
@@ -78,8 +78,8 @@ class ImageResultsDataset(Dataset):
 
     def _find_label_path(self, image_fname):
         """Find corresponding .csv label file (same name without extension + .csv)"""
-        base_name, _ = os.path.splitext(image_fname)
-        csv_name = base_name + ".csv"
+        # base_name, _ = os.path.splitext(image_fname)
+        csv_name = image_fname + ".csv"
         csv_path = os.path.join(self.data_folder_path, csv_name)
 
         if os.path.isfile(csv_path):
@@ -91,44 +91,31 @@ class ImageResultsDataset(Dataset):
 
     def __getitem__(self, idx):
         img_path, label_path = self.samples[idx]
-
-        # Load image
         img = Image.open(img_path).convert('RGB')
 
-        # Apply transforms if provided
         if self.transforms is not None:
             img = self.transforms(img)
 
-        # To tensor + normalize [-1..1]
         if not isinstance(img, torch.Tensor):
             img = tv_tfs.ToTensor()(img)
-        img = img * 2.0 - 1.0
 
-        # If single channel → repeat to 3
         if img.shape[0] == 1:
             img = torch.cat([img] * 3, dim=0)
 
-        # Resize to target shape (if needed)
+        # Resize to target shape (if not already handled by transforms) [cite: 1]
         if img.shape[1:] != tuple(self.img_shape[:2]):
             img = tv_tfs.Resize(self.img_shape[:2], antialias=True)(img)
 
-        # Load and order labels
+        # Load and order labels from CSV [cite: 1]
         labels_df = pd.read_csv(label_path)
-        # Take values in the exact order from data_label_ordering
         label_values = []
         for label_name in self.data_label_ordering:
             if label_name in labels_df.columns:
                 val = float(labels_df[label_name].iloc[0])
             else:
-                val = 0.0  # fallback if column missing
+                val = 0.0
             label_values.append(val)
 
         labels = torch.tensor(label_values, dtype=torch.float32)
-
-        # Optional: override correctness label
-        if self.label_correct_index >= 0:
-            # You can set logic here if needed (e.g. always 1 for correct crops)
-            # Currently left as-is from file
-            pass
 
         return img, labels, os.path.basename(img_path)
