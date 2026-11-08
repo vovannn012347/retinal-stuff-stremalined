@@ -1,0 +1,16 @@
+# Standard laptop, CPU only (Windows or Linux).
+extends: surgical_base.yaml
+
+run:
+  name: surgical_laptop
+
+device:
+  use_cuda_if_available: false
+  cpu_threads: 0
+
+training:
+  batch_size: 8
+  num_workers: 0            # Windows: worker processes are slow to start and copy the image cache
+
+preprocess:
+  cache_images: true

@@ -1,0 +1,13 @@
+# Ubuntu + CUDA GPU.
+extends: surgical_base.yaml
+
+run:
+  name: surgical_gpu
+
+device:
+  use_cuda_if_available: true
+  amp: auto
+
+training:
+  batch_size: 32
+  num_workers: 4

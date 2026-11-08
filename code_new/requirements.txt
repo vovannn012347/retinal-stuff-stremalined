@@ -1,0 +1,7 @@
+# torch / torchvision are installed by the setup scripts (the right build for the machine):
+#   setup/setup_laptop_windows.bat   -> CPU build
+#   setup/setup_ubuntu_cuda.sh       -> CUDA build matching the NVIDIA driver
+numpy>=1.24
+pillow>=10.0
+pyyaml>=6.0
+matplotlib>=3.7          # plot_log.py only
