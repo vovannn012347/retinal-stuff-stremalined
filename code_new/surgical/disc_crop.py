@@ -17,7 +17,19 @@ import cv2
 import numpy as np
 
 DEFAULTS = {'size': 256, 'margin': 1.75, 'min_completeness': 0.90, 'min_solidity': 0.85,
-            'black_level': 10, 'edge_px': 2, 'min_area_px': 200}
+            'black_level': 10, 'edge_px': 2, 'min_area_px': 200, 'open_frac': 0.03}
+
+
+def clean_mask(mask: np.ndarray, open_frac: float = 0.03) -> np.ndarray:
+    """Post-processing of a predicted (or drawn) disc mask, the replacement for the old magic-wand step:
+    morphological opening with a disc of open_frac x image width (cuts thin bridges along vessels and
+    removes specks) -> largest connected blob -> holes filled. Returns bool [H, W]."""
+    m = mask.astype(np.uint8)
+    k = int(round(open_frac * max(m.shape)))
+    if k >= 3:
+        k += 1 - k % 2
+        m = cv2.morphologyEx(m, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    return _largest_blob(m > 0)
 
 
 @dataclass
@@ -64,7 +76,7 @@ def analyse(rgb: np.ndarray, mask: np.ndarray, p: Optional[dict] = None) -> Disc
     """rgb: uint8 [H,W,3] original photo; mask: [H,W] disc mask (any dtype, >0 / >127 = disc)."""
     p = {**DEFAULTS, **(p or {})}
     m = mask > (127 if mask.dtype == np.uint8 and mask.max() > 1 else 0)
-    disc = _largest_blob(m)
+    disc = clean_mask(m, p['open_frac'])
     area = int(disc.sum())
     if area < p['min_area_px']:
         return DiscInfo('no_disc', 'optic disc not found in the photo')

@@ -53,12 +53,14 @@ folds:
   min_steps_per_step: 20                # a fold of ~10 images is only 1-2 optimizer steps: sweep it more often,
                                         # so every dropout/penalty step gets ~100 steps to adapt
 
-# Recall matters more than precision: a missed piece of the disc is worse than a few extra pixels.
+# The loss stays nearly balanced: a weak background penalty makes the prediction spread along the
+# vessels into connected blobs (the old trainer weighted the background 10 vs disc 3 for that reason).
+# The recall priority is enforced by the gate, measured on the CLEANED mask that the pipeline uses.
 loss:
-  pos_weight: 3.0                       # BCE weight of disc pixels
-  tversky_weight: 1.0                   # + Tversky loss; beta > alpha punishes missed disc pixels more
-  tversky_alpha: 0.3                    # weight of false positives
-  tversky_beta: 0.7                     # weight of false negatives
+  pos_weight: 1.0                       # BCE weight of disc pixels (1 = balanced)
+  tversky_weight: 1.0                   # + Tversky loss
+  tversky_alpha: 0.4                    # weight of false positives
+  tversky_beta: 0.6                     # weight of false negatives (slightly above alpha: mild recall bias)
 
 # Pixel metrics pooled over the pass:
 #   recall    = correctly found disc pixels / all disc pixels       TP / (TP + FN)
@@ -66,7 +68,14 @@ loss:
 # Pixels within boundary_tolerance_px of the true mask edge are not counted (2.9 % of disc pixels lie
 # within 1 px of the edge, 5.7 % within 2 px at 576 px; the drawn edge is not more precise than that).
 # strict_recall / strict_precision (every pixel) are logged too.
+# Metrics are taken on the cleaned prediction (clean_prediction: opening with a disc of open_frac x
+# image width, then the largest blob, holes filled) - the same post-processing crop_discs.py and the
+# inference script use instead of the old magic wand. spill = share of predicted pixels thrown away
+# by the cleaning (bridges, separate patches); pieces = connected blobs per image before cleaning.
 gate:
   recall: 0.95
   precision: 0.70
   boundary_tolerance_px: 2
+  clean_prediction: true
+  open_frac: 0.03
+  max_spill: 0.15                       # the raw prediction may not scatter more than 15 % of its pixels

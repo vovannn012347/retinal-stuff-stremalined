@@ -278,6 +278,24 @@ def test_disc_crop():
     print("disc crop: centred ok, cut disc -> partial, no mask -> no_disc")
 
 
+def test_clean_mask_and_spill():
+    from surgical.disc_crop import clean_mask
+    from surgical.tasks import _SegAcc
+    yy, xx = np.mgrid[0:200, 0:200]
+    disc = (yy - 100) ** 2 + (xx - 70) ** 2 < 30 ** 2
+    blob = (yy - 100) ** 2 + (xx - 160) ** 2 < 18 ** 2           # a second patch ...
+    bridge = (abs(yy - 100) <= 1) & (xx > 95) & (xx < 145)       # ... joined by a 3 px "vessel"
+    pred = disc | blob | bridge
+    c = clean_mask(pred, 0.03)
+    assert c[100, 70] and not c[100, 160] and not c[100, 120], "bridge not cut / wrong blob kept"
+    acc = _SegAcc(0.5, 0, True, 0.03)
+    logits = torch.from_numpy(np.where(pred, 10.0, -10.0)).float()[None, None]
+    acc.add(logits, torch.from_numpy(disc.astype(np.float32))[None, None])
+    m = acc.result()
+    assert m['spill'] > 0.2 and m['recall'] > 0.97 and m['precision'] > 0.97, m
+    print(f"clean mask: bridge cut, extra patch dropped; spill {m['spill']:.2f}, cleaned recall {m['recall']:.2f}")
+
+
 if __name__ == '__main__':
     for name, fn in list(globals().items()):
         if name.startswith('test_'):

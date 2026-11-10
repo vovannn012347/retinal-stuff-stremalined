@@ -368,21 +368,28 @@ class DefinitorTask:
         return 1 - self._tversky(p, y.float())
 
     def new_accumulator(self):
-        return _SegAcc(float(self.cfg.gate.decision_threshold), self.tol)
+        g = self.cfg.gate
+        return _SegAcc(float(g.decision_threshold), self.tol, bool(g.get('clean_prediction', True)),
+                       float(g.get('open_frac', 0.03)))
 
     def gate(self, m):
         g = self.cfg.gate
         rec, prec = m['recall'], m['precision']
-        passed = not math.isnan(rec) and rec >= g['recall'] and not math.isnan(prec) and prec >= g['precision']
+        spill, max_spill = m.get('spill', float('nan')), float(g.get('max_spill', 1.0))
+        spill_ok = math.isnan(spill) or spill <= max_spill
+        passed = (not math.isnan(rec) and rec >= g['recall'] and not math.isnan(prec) and prec >= g['precision']
+                  and spill_ok)
         tol = g.get('degrade_tolerance', 0.02)
         degraded = math.isnan(rec) or rec < g['recall'] - tol or prec < g['precision'] - tol
         return passed, degraded
 
     def metric_fields(self):
-        return ['recall', 'precision', 'strict_recall', 'strict_precision', 'iou', 'dice', 'img_recall_min']
+        return ['recall', 'precision', 'strict_recall', 'strict_precision', 'iou', 'dice', 'img_recall_min',
+                'spill', 'pieces']
 
     def short(self, m):
         return (f"recall {_f(m.get('recall'))} precision {_f(m.get('precision'))} iou {_f(m.get('iou'))}"
+                f" spill {_f(m.get('spill'))} pieces {_f(m.get('pieces'), 1)}"
                 f" (worst image recall {_f(m.get('img_recall_min'))})")
 
 
@@ -391,14 +398,27 @@ class _SegAcc:
     true mask edge are not counted at all (the hand-drawn edge is uncertain by about that much);
     strict (untolerant) recall/precision are reported too."""
 
-    def __init__(self, thr, tol=0):
-        self.thr, self.tol = thr, tol
-        self.c = {'tp': 0, 'fp': 0, 'fn': 0, 'stp': 0, 'sfp': 0, 'sfn': 0}
+    def __init__(self, thr, tol=0, clean=True, open_frac=0.03):
+        self.thr, self.tol, self.clean, self.open_frac = thr, tol, clean, open_frac
+        self.c = {'tp': 0, 'fp': 0, 'fn': 0, 'stp': 0, 'sfp': 0, 'sfn': 0, 'raw': 0, 'kept': 0, 'pieces': 0, 'n': 0}
         self.img_rec = []
 
     def add(self, logits, y):
-        p = torch.sigmoid(logits.float()) >= self.thr
+        raw = torch.sigmoid(logits.float()) >= self.thr
         t = y >= 0.5
+        if self.clean:
+            # what the pipeline will actually use: opening + largest blob (see disc_crop.clean_mask)
+            import cv2
+            from .disc_crop import clean_mask
+            rn = raw[:, 0].cpu().numpy()
+            cleaned = np.stack([clean_mask(a, self.open_frac) for a in rn])
+            for a in rn:
+                self.c['pieces'] += max(0, cv2.connectedComponents(a.astype(np.uint8), connectivity=8)[0] - 1)
+            p = torch.from_numpy(cleaned)[:, None].to(raw.device)
+            self.c['raw'] += int(raw.sum()); self.c['kept'] += int((p & raw).sum())
+        else:
+            p = raw
+        self.c['n'] += raw.shape[0]
         valid = torch.ones_like(t)
         if self.tol > 0:
             k = 2 * self.tol + 1
@@ -425,7 +445,10 @@ class _SegAcc:
         s = c['stp'] + c['sfp'] + c['sfn']
         m = {'recall': rec, 'precision': prec, 'strict_recall': srec, 'strict_precision': sprec,
              'iou': c['stp'] / s if s else float('nan'), 'dice': 2 * c['stp'] / (s + c['stp']) if s else float('nan'),
-             'img_recall_min': min(self.img_rec) if self.img_rec else float('nan')}
+             'img_recall_min': min(self.img_rec) if self.img_rec else float('nan'),
+             # spill: share of predicted pixels outside the kept disc blob (bridges, separate patches)
+             'spill': 1 - c['kept'] / c['raw'] if c['raw'] else float('nan'),
+             'pieces': c['pieces'] / c['n'] if c['n'] else float('nan')}
         m['gate_main'], m['gate_recall'] = prec, rec
         return m
 
