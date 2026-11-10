@@ -20,6 +20,7 @@ device:
 folds:
   k: 5
   repeats_per_step: 1                   # sweeps over the training fold in one step
+  min_steps_per_step: 0                 # >0: sweep the fold as often as needed for this many optimizer steps
   passes_per_dataset: 3                 # switch to the next dataset after this many passes
   test_fraction: 0.10                   # patients held out completely (never trained on); 0 = off
 
@@ -40,26 +41,46 @@ replay:
   min_error: 0.25
   gain: 1.0
   max_extra: 3
+  # wrong-label safety: still wrong (error >= suspect_error) while the rest of its fold is learned,
+  # suspect_after times in a row -> "suspect", no more repeats, listed first in mistakes.csv
+  suspect_error: 0.5
+  suspect_after: 8
 
 model:
   checkpoint: null                      # for init: checkpoint
 
+# Memory: batch_size = images per forward pass (what the GPU/PC must hold). Gradients are
+# accumulated until effective_batch_size images, then one optimizer step, so a small batch_size
+# trains like a large one. On a CUDA out-of-memory error the batch is halved automatically and
+# accumulation doubled (same effective batch), and the step is repeated.
 training:
-  lr_cycle_decay: 0.8                   # lr *= this after every cut
-  lr_min: 1.0e-6
-  weight_decay: 0.0
+  # optimizer: AdamW, two learning rates - pretrained encoder = lr, new layers = lr * new_layers_lr_mult
+  new_layers_lr_mult: 1.0
+  weight_decay: 1.0e-4                  # decoupled (AdamW)
   betas: [0.9, 0.999]
   grad_clip: 5.0                        # 0 = off
+  warmup_steps: 50                      # linear lr warm-up after every new optimizer (start, cut, retry)
+  # reduce-on-plateau during the learn phase (gate-source loss, i.e. the held-out patients)
+  plateau_passes: 12                    # the test loss is noisy (few patients): be patient
+  plateau_factor: 0.5
+  plateau_min_delta: 0.01               # relative improvement that counts
+  plateau_max_reductions: 3             # per learn phase (lr never drops below 1/8 of where the phase started)
+  lr_cycle_decay: 0.8                   # after a cut: lr = (lr of the accepted model) * this
+  lr_min: 1.0e-6
 
+# The gate is checked on the held-out test patients: with fold rotation the "next fold" has
+# already been trained on in earlier passes, so its numbers are optimistic. overfit_gap in log.csv
+# = recall on folds - recall on test; a growing gap means the network memorises.
 gate:
-  source: folds                         # folds | test  (test = the held-out patients)
+  source: test                          # test | folds  (falls back to folds if there is no test split)
   decision_threshold: 0.5
   degrade_tolerance: 0.02               # during the ramp: below gate - tolerance => hold the ramp
 
 # ── SurgicalSlicing schedule ──────────────────────────────────────────────────────────
 surgical:
   # learn phase
-  learn_dropout: 0.0
+  learn_dropout: 0.04                   # light dropout already while learning; the ramp continues from here
+                                        # (keep it a multiple of dropout_step so the ramp hits 0.20 exactly)
   min_learn_passes: 3
   gate_consecutive_passes: 2            # gate must hold this many passes in a row
   max_learn_passes: 200                 # first cycle; raise it if the gate is reached late

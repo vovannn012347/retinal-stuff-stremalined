@@ -6,4 +6,5 @@ run:
 
 training:
   batch_size: 32
+  effective_batch_size: 32
   num_workers: 4

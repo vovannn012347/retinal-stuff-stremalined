@@ -9,12 +9,13 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn as nn
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from surgical import surgery as S                                                     # noqa: E402
 from surgical.config import load_config                                               # noqa: E402
 from surgical.data import FoldRotation, MistakeTracker, Sample, group_key, split_groups  # noqa: E402
-from surgical.definitor_model import DefinitorNet, default_widths, load_definitor_file  # noqa: E402
+from surgical.definitor_model import ENC_CONVS, DefinitorNet, default_widths, load_definitor_file  # noqa: E402
 from surgical.model import GlaucomaNet, default_channels, load_model_file             # noqa: E402
 from surgical.phases import SurgicalSchedule                                          # noqa: E402
 
@@ -56,6 +57,46 @@ def test_cut_exact_definitor():
     print(f"definitor cut exact (skip connections, ConvTranspose): {a} -> {b}")
 
 
+def test_cut_exact_classifier_flatten():
+    torch.manual_seed(0)
+    a, b = _check_cut(GlaucomaNet(default_channels(8), hidden=16, input_size=32, head='flatten'),
+                      torch.randn(4, 3, 32, 32), 'l1_inout')
+    print(f"classifier (old flatten head) cut exact: {a} -> {b}")
+
+
+def test_sliced_vgg_init():
+    import torchvision.models as tvm
+    from surgical import vgg_init
+    real = tvm.vgg16
+    tvm.vgg16 = lambda weights=None: real(weights=None)        # offline: random VGG with the real shapes
+    try:
+        torch.manual_seed(0)
+        m = DefinitorNet(default_widths(32))
+        torch.manual_seed(5)
+        vgg_init.copy_vgg16_into(m, ENC_CONVS)
+        torch.manual_seed(5)
+        v = [layer for layer in real(weights=None).features if isinstance(layer, nn.Conv2d)]
+        e = dict(m.named_modules())
+        k = torch.argsort(v[0].weight.abs().flatten(1).sum(1), descending=True)[:32].sort().values
+        assert torch.equal(e['encoder1.0'].weight, v[0].weight[k])
+        w1 = v[1].weight[:, k]
+        k2 = torch.argsort(w1.abs().flatten(1).sum(1), descending=True)[:32].sort().values
+        assert torch.equal(e['encoder1.2'].weight, w1[k2])
+    finally:
+        tvm.vgg16 = real
+    print("sliced VGG16 init (base 32 takes the strongest, consistent filters): ok")
+
+
+def test_boundary_tolerance():
+    from surgical.tasks import _SegAcc
+    y = torch.zeros(1, 1, 32, 32); y[..., 10:20, 10:20] = 1
+    logits = torch.full_like(y, -10.0); logits[..., 11:19, 11:19] = 10      # 1 px short on every side
+    strict = _SegAcc(0.5, 0); strict.add(logits, y); s = strict.result()
+    tol = _SegAcc(0.5, 1); tol.add(logits, y); t = tol.result()
+    assert s['recall'] < 0.7 and abs(t['recall'] - 1.0) < 1e-9 and abs(t['strict_recall'] - s['recall']) < 1e-9
+    print(f"boundary tolerance: strict recall {s['recall']:.2f}, with 1 px tolerance {t['recall']:.2f}")
+
+
 def test_old_classifier_checkpoint():
     old = GlaucomaNet(default_channels(8), hidden=16, input_size=32)
     with tempfile.TemporaryDirectory() as d:
@@ -63,7 +104,10 @@ def test_old_classifier_checkpoint():
         torch.save({'state_dict': old.state_dict(), 'optimizer': None,
                     'metadata': {'epoch': 5, 'base_channels': 8, 'num_classes': 3, 'input_size': 32}}, p)
         m = load_model_file(p)
-        assert m.channels == default_channels(8) and m.hidden == 16
+        assert m.channels == default_channels(8) and m.hidden == 16 and m.head == 'gap'
+        old_flat = GlaucomaNet(default_channels(8), hidden=16, input_size=32, head='flatten')
+        torch.save({'state_dict': old_flat.state_dict(), 'metadata': {'input_size': 32}}, p)
+        assert load_model_file(p).head == 'flatten'
     print("old classifier checkpoint: ok")
 
 
@@ -117,7 +161,8 @@ def test_schedule_timing():
     assert len(sel_at) == 1 and abs(trace[sel_at[0]][0] - 0.2) < 1e-9
     assert abs(trace[-1][0] - 0.5) < 1e-9 and abs(trace[-1][1] - 0.5) < 1e-9
     pen = sum(1 for t in trace if t[1] > 0)
-    assert n == 25 and pen == 16, (n, pen)
+    want = round((0.5 - float(cfg['learn_dropout'])) / 0.02)
+    assert n == want and pen == 16, (n, want, pen)
     print(f"schedule: {n} ramp passes, select at dropout 0.2, {pen} penalty passes")
 
 
@@ -177,6 +222,18 @@ def test_mistake_replay():
     assert [idx2.count(i) for i in range(6)] == [1, 1, 1, 1, 4, 4], idx2
     t.update(['s5'], [0.05])                                       # ema: 0.95 -> 0.5
     assert abs(t.rec['s5']['err'] - 0.5) < 1e-9
+    # suspect: wrong while the rest of the fold is learned, N times in a row
+    t3 = MistakeTracker({'min_error': 0.25, 'suspect_error': 0.5, 'suspect_after': 3})
+    for _ in range(3):
+        t3.update([s.path for s in samples], [0.9] * 6)            # all wrong: no suspicion yet
+    assert t3.n_suspect() == 0
+    for _ in range(3):
+        t3.update([s.path for s in samples], [0.0] * 5 + [0.9])    # only s5 wrong
+    assert t3.rec['s5']['suspect'] and t3.n_suspect() == 1
+    idx3, _ = t3.expand(list(range(6)), samples)
+    assert idx3.count(5) == 1                                      # suspect: not repeated
+    t3.update(['s5', 's0'], [0.0, 0.0])
+    assert not t3.rec['s5']['suspect']
     print("mistake replay: ok", idx)
 
 

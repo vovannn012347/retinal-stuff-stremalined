@@ -10,6 +10,10 @@ device:
 preprocess:
   size: 288
 
+gate:
+  boundary_tolerance_px: 1              # half resolution
+
 training:
-  batch_size: 2
+  batch_size: 1
+  effective_batch_size: 8
   num_workers: 0

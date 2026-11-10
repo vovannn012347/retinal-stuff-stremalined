@@ -122,6 +122,12 @@ class DefinitorNet(nn.Module):
     def predict_proba(self, x):
         return torch.sigmoid(self.forward(x))
 
+    def param_groups(self):
+        """(pretrained-encoder params, newly initialised params: intermediate + decoder)"""
+        enc = [p for n, p in self.named_parameters() if n.startswith('encoder')]
+        new = [p for n, p in self.named_parameters() if not n.startswith('encoder')]
+        return enc, new
+
 
 # ── loading ───────────────────────────────────────────────────────────────────────────
 def _param_layers_in_order(sd: dict, prefix: str):
@@ -180,13 +186,7 @@ def load_definitor_file(path, map_location='cpu') -> DefinitorNet:
 
 
 def init_definitor_from_vgg16(model: DefinitorNet):
-    from torchvision.models import vgg16, VGG16_Weights
-    vgg_convs = [m for m in vgg16(weights=VGG16_Weights.DEFAULT).features if isinstance(m, nn.Conv2d)]
-    mods = dict(model.named_modules())
-    for name, src in zip(ENC_CONVS, vgg_convs):
-        dst = mods[name]
-        if dst.weight.shape != src.weight.shape:
-            raise ValueError(f"VGG16 init needs model.base=64 ({name}: {tuple(dst.weight.shape)})")
-        with torch.no_grad():
-            dst.weight.copy_(src.weight); dst.bias.copy_(src.bias)
+    """VGG16 ImageNet weights into the encoder; narrower models get the strongest filters."""
+    from .vgg_init import copy_vgg16_into
+    copy_vgg16_into(model, ENC_CONVS)
     return model

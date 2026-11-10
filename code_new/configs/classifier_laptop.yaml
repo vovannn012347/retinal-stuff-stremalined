@@ -9,4 +9,5 @@ device:
 
 training:
   batch_size: 8
+  effective_batch_size: 16
   num_workers: 0            # Windows: worker processes are slow to start and copy the image cache

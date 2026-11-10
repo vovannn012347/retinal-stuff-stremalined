@@ -21,20 +21,32 @@ preprocess:
   grayscale: true                       # the old trainer fed grey images (RandomGreyscale p=1)
   cache_images: true
 
-augmentation:                           # applied to image and mask together
+augmentation:                           # geometric ones applied to image and mask together
   hflip: 0.5
   vflip: 0.5
   rotation_degrees: 10
+  scale: 0.10                           # +-10 %
+  shift: 0.08                           # +-8 % of the size (teaches "find the disc", not "remember where it was")
   brightness_contrast: [0.15, 0.15]     # image only
+  gamma: 0.25                           # gamma in [0.8, 1.25], image only
+  blur_p: 0.2                           # probability of a light gaussian blur, image only
 
 model:
-  init: vgg16                           # vgg16 (encoder) | checkpoint | scratch
-  base: 64                              # old FcnskipNerveDefinitor2 checkpoints load with init: checkpoint
+  init: vgg16                           # vgg16 (encoder; base < 64 takes the strongest VGG filters) | checkpoint | scratch
+  base: 32                              # ~60 annotated images: half width (3.2M params instead of 12.7M)
+                                        # old FcnskipNerveDefinitor2 checkpoints load with init: checkpoint
 
 training:
-  batch_size: 4
+  batch_size: 2                         # images per forward pass (memory)
+  effective_batch_size: 8               # images per optimizer step (gradient accumulation)
   num_workers: 2
-  lr: 5.0e-5
+  lr: 5.0e-5                            # VGG encoder
+  new_layers_lr_mult: 4                 # decoder starts from random: 2e-4
+
+folds:
+  test_fraction: 0.20                   # ~7 patients held out: the gate needs more than 3-4 to mean anything
+  min_steps_per_step: 20                # a fold of ~10 images is only 1-2 optimizer steps: sweep it more often,
+                                        # so every dropout/penalty step gets ~100 steps to adapt
 
 # Recall matters more than precision: a missed piece of the disc is worse than a few extra pixels.
 loss:
@@ -46,6 +58,10 @@ loss:
 # Pixel metrics pooled over the pass:
 #   recall    = correctly found disc pixels / all disc pixels       TP / (TP + FN)
 #   precision = correctly found disc pixels / all predicted pixels  TP / (TP + FP)
+# Pixels within boundary_tolerance_px of the true mask edge are not counted (2.9 % of disc pixels lie
+# within 1 px of the edge, 5.7 % within 2 px at 576 px; the drawn edge is not more precise than that).
+# strict_recall / strict_precision (every pixel) are logged too.
 gate:
   recall: 0.95
   precision: 0.70
+  boundary_tolerance_px: 2

@@ -158,7 +158,11 @@ class MistakeTracker:
     trains on it in this pass), kept as a moving average. When a fold is trained, every sample whose
     error is >= min_error AND above the fold median (so early on, when everything is wrong, only the
     worse half) is repeated:  extra copies = min(max_extra, floor(gain * error / min_error)).
-    With min_error 0.25: error 0.25 -> +1, 0.5 -> +2, >= 0.75 -> +3 (cap)."""
+    With min_error 0.25: error 0.25 -> +1, 0.5 -> +2, >= 0.75 -> +3 (cap).
+    Safety against wrong labels/masks: a sample that is still wrong (error >= suspect_error) while
+    most of its fold is already learned (fold median < min_error), suspect_after evaluations in a
+    row, is marked "suspect" and no longer repeated (listed first in mistakes.csv - check its
+    label/mask); it is un-marked as soon as it is learned. Call update() once per evaluated fold."""
 
     def __init__(self, cfg):
         self.enabled = bool(cfg.get('enabled', True))
@@ -166,18 +170,27 @@ class MistakeTracker:
         self.gain = float(cfg.get('gain', 1.0))
         self.max_extra = int(cfg.get('max_extra', 3))
         self.min_error = float(cfg.get('min_error', 0.25))
+        self.suspect_error = float(cfg.get('suspect_error', 0.5))
+        self.suspect_after = int(cfg.get('suspect_after', 8))
         self.rec: Dict[str, dict] = {}
 
     def update(self, paths, errors):
+        errors = [float(e) for e in errors]
+        fold_learned = len(errors) >= 2 and float(np.median(errors)) < self.min_error
         for p, e in zip(paths, errors):
             e = float(e)
             r = self.rec.get(p)
             if r is None:
-                self.rec[p] = {'err': e, 'last': e, 'seen': 1, 'repeats': 0}
+                r = self.rec[p] = {'err': e, 'last': e, 'seen': 1, 'repeats': 0, 'bad_streak': 0, 'suspect': False}
             else:
                 r['err'] = self.ema * r['err'] + (1 - self.ema) * e
                 r['last'] = e
                 r['seen'] += 1
+            if e < self.suspect_error:
+                r['bad_streak'] = 0
+            elif fold_learned:
+                r['bad_streak'] = r.get('bad_streak', 0) + 1
+            r['suspect'] = self.suspect_after > 0 and r['bad_streak'] >= self.suspect_after
 
     def expand(self, indices, samples) -> (List[int], int):
         """-> (training index list with repeats, number of extra items)."""
@@ -189,7 +202,7 @@ class MistakeTracker:
         for i in indices:
             out.append(i)
             r = self.rec.get(samples[i].path)
-            if r is None or r['err'] < self.min_error or r['err'] <= med:
+            if r is None or r.get('suspect') or r['err'] < self.min_error or r['err'] <= med:
                 continue
             extra = min(self.max_extra, int(self.gain * r['err'] / self.min_error))
             if extra > 0:
@@ -199,13 +212,17 @@ class MistakeTracker:
         return out, extra_total
 
     def write_csv(self, path: Path, top: int = 0):
-        rows = sorted(self.rec.items(), key=lambda kv: -kv[1]['err'])
+        rows = sorted(self.rec.items(), key=lambda kv: (not kv[1].get('suspect'), -kv[1]['err']))
         if top:
             rows = rows[:top]
         with open(path, 'w', encoding='utf-8') as f:
-            f.write('path,error_ema,last_error,times_tested,extra_repeats\n')
+            f.write('path,suspect_label,error_ema,last_error,times_tested,wrong_in_a_row,extra_repeats\n')
             for p, r in rows:
-                f.write(f'"{p}",{r["err"]:.6g},{r["last"]:.6g},{r["seen"]},{r["repeats"]}\n')
+                f.write(f'"{p}",{int(bool(r.get("suspect")))},{r["err"]:.6g},{r["last"]:.6g},{r["seen"]},'
+                        f'{r.get("bad_streak", 0)},{r["repeats"]}\n')
+
+    def n_suspect(self):
+        return sum(1 for r in self.rec.values() if r.get('suspect'))
 
     def state_dict(self):
         return {'rec': self.rec}

@@ -59,9 +59,11 @@ def make_definitor_ds(root: Path, n: int, seed: int, hard_every: int = 7):
         Image.fromarray((disc * 255).astype(np.uint8)).save(root / 'masks' / f"{name}.mask.png")
 
 
-def run(args, cwd):
+def run(args, cwd, env=None):
+    import os
     print('$', ' '.join(str(a) for a in args), flush=True)
-    return subprocess.run([sys.executable] + [str(a) for a in args], cwd=cwd).returncode
+    e = dict(os.environ, **(env or {}))
+    return subprocess.run([sys.executable] + [str(a) for a in args], cwd=cwd, env=e).returncode
 
 
 def check_run(rd: Path, datasets):
@@ -95,16 +97,22 @@ preprocess: {{size: 32}}
 augmentation: {{randaug_magnitude: 0, rotation_degrees: 0, color_jitter: [0, 0, 0, 0]}}
 folds: {{k: 3, passes_per_dataset: 3, test_fraction: 0.1}}
 model: {{init: scratch, base: 8, hidden: 16}}
-training: {{batch_size: 16, num_workers: 0, lr: 3.0e-3, pos_weight: [1.0, 1.0, 1.0]}}
+training: {{batch_size: 16, effective_batch_size: 16, num_workers: 0, lr: 3.0e-3, new_layers_lr_mult: 1,
+           pos_weight: [1.0, 1.0, 1.0], warmup_steps: 5}}
 surgical: {{min_learn_passes: 2, max_learn_passes: 80, max_recover_passes: 40, max_cycles: 2,
            cut_ratio: 0.25, min_channels: 2, target_param_ratio: 0.01}}
 logging: {{print_every_steps: 1000}}
 """, encoding='utf-8')
     train = CODE / 'train_surgical.py'
-    assert run([train, '--config', cfg, '--max-steps', 20], tmp) == 0
+    # first part on a "GPU" that holds only 4 images: batch 16 must fall back to 4 x 4 accumulation
+    assert run([train, '--config', cfg, '--max-steps', 20], tmp, {'SURGICAL_TEST_OOM': '4'}) == 0
+    ev = (tmp / 'runs' / 'cls' / 'events.log').read_text(encoding='utf-8')
+    assert 'batch 4 x 4 accumulation' in ev, 'OOM back-off did not happen'
     assert run([train, '--config', cfg, '--resume'], tmp) == 0
     rd = tmp / 'runs' / 'cls'
     check_run(rd, ['ds_a', 'ds_b'])
+    rows = list(csv.DictReader(open(rd / 'log.csv', encoding='utf-8')))
+    assert rows[-1]['batch'] == '4x4' and rows[-1]['gate_source'] == 'test', (rows[-1]['batch'], rows[-1]['gate_source'])
     assert run([CODE / 'evaluate.py', '--config', cfg, '--model', rd / 'final_model.pth',
                 '--split', rd / 'split_ds_a.json'], tmp) == 0
     assert run([CODE / 'plot_log.py', rd], tmp) == 0
@@ -122,10 +130,10 @@ datasets:
   - {{name: dd_b, images: {tmp / 'dd_b' / 'images'}, masks: {tmp / 'dd_b' / 'masks'}}}
 preprocess: {{size: 48}}
 augmentation: {{rotation_degrees: 0}}
-folds: {{k: 3, passes_per_dataset: 3, test_fraction: 0.1}}
+folds: {{k: 3, passes_per_dataset: 3, test_fraction: 0.15, min_steps_per_step: 4}}
 model: {{init: scratch, base: 4}}
-training: {{batch_size: 8, num_workers: 0, lr: 3.0e-3}}
-gate: {{recall: 0.90, precision: 0.60}}
+training: {{batch_size: 4, effective_batch_size: 8, num_workers: 0, lr: 3.0e-3, new_layers_lr_mult: 1, warmup_steps: 5}}
+gate: {{recall: 0.90, precision: 0.60, boundary_tolerance_px: 1}}
 surgical: {{min_learn_passes: 2, max_learn_passes: 120, max_recover_passes: 60, max_cycles: 2,
            cut_ratio: 0.25, min_channels: 2, target_param_ratio: 0.01}}
 logging: {{print_every_steps: 1000}}
@@ -142,6 +150,8 @@ logging: {{print_every_steps: 1000}}
                 '--out', tmp / 'pred'], tmp) == 0
     assert len(list((tmp / 'pred').glob('*.mask.png'))) == 2
     assert run([CODE / 'plot_log.py', rd], tmp) == 0
+    assert run([CODE / 'lr_find.py', '--config', cfg, '--steps', 60], tmp) == 0
+    assert (tmp / 'runs' / 'lr_find_deff' / 'lr_find.png').is_file()
     print("DEFINITOR SMOKE OK")
 
 

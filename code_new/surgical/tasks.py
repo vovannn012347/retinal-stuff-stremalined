@@ -147,7 +147,8 @@ class ClassifierTask:
     def build_model(self):
         from .model import GlaucomaNet, default_channels, init_from_vgg16
         m = self.cfg.model
-        model = GlaucomaNet(default_channels(int(m.base)), int(m.hidden), len(self.order), self.size)
+        model = GlaucomaNet(default_channels(int(m.base)), int(m.hidden), len(self.order), self.size,
+                            head=m.get('head', 'gap'))
         if m.init == 'vgg16':
             init_from_vgg16(model); self.log("model initialised from VGG16 (ImageNet)")
         return model
@@ -242,7 +243,12 @@ class DefinitorTask:
         a = cfg.augmentation
         self.hflip, self.vflip = float(a.get('hflip', 0.5)), float(a.get('vflip', 0.5))
         self.rot = float(a.get('rotation_degrees', 0))
+        self.scale = float(a.get('scale', 0.0))           # +- fraction
+        self.shift = float(a.get('shift', 0.0))           # +- fraction of the size
         self.bc = a.get('brightness_contrast', [0.15, 0.15])
+        self.gamma = float(a.get('gamma', 0.0))           # gamma in [1/(1+g), 1+g]
+        self.blur_p = float(a.get('blur_p', 0.0))
+        self.tol = int(cfg.gate.get('boundary_tolerance_px', 0))
         lo = cfg.loss
         self.pos_weight = float(lo.get('pos_weight', 3.0))
         self.tv_w = float(lo.get('tversky_weight', 1.0))
@@ -297,11 +303,22 @@ class DefinitorTask:
                 x, y = x.flip(-1), y.flip(-1)
             if torch.rand(1).item() < self.vflip:
                 x, y = x.flip(-2), y.flip(-2)
-            if self.rot > 0:
+            if self.rot > 0 or self.scale > 0 or self.shift > 0:
                 import torchvision.transforms.functional as TF
-                ang = float(torch.empty(1).uniform_(-self.rot, self.rot))
-                x = TF.rotate(x, ang, interpolation=TF.InterpolationMode.BILINEAR, fill=-1.0)
-                y = (TF.rotate(y, ang, interpolation=TF.InterpolationMode.NEAREST, fill=0.0) > 0.5).float()
+                u = lambda r: float(torch.empty(1).uniform_(-r, r))          # noqa: E731
+                ang, sc = u(self.rot), 1.0 + u(self.scale)
+                tr = [int(round(u(self.shift) * self.size)), int(round(u(self.shift) * self.size))]
+                x = TF.affine(x, angle=ang, translate=tr, scale=sc, shear=[0.0],
+                              interpolation=TF.InterpolationMode.BILINEAR, fill=-1.0)
+                y = (TF.affine(y, angle=ang, translate=tr, scale=sc, shear=[0.0],
+                               interpolation=TF.InterpolationMode.NEAREST, fill=0.0) > 0.5).float()
+            if self.gamma > 0:
+                g = float(torch.empty(1).uniform_(-1, 1))
+                g = (1 + self.gamma) ** g
+                x = ((x + 1) / 2).clamp_(0, 1).pow_(g).mul_(2).sub_(1)
+            if self.blur_p > 0 and torch.rand(1).item() < self.blur_p:
+                import torchvision.transforms.functional as TF
+                x = TF.gaussian_blur(x, kernel_size=5, sigma=float(torch.empty(1).uniform_(0.5, 1.2)))
             if self.bc and any(v > 0 for v in self.bc):
                 b = float(torch.empty(1).uniform_(-self.bc[0], self.bc[0])) * 2
                 c = 1.0 + float(torch.empty(1).uniform_(-self.bc[1], self.bc[1]))
@@ -351,7 +368,7 @@ class DefinitorTask:
         return 1 - self._tversky(p, y.float())
 
     def new_accumulator(self):
-        return _SegAcc(float(self.cfg.gate.decision_threshold))
+        return _SegAcc(float(self.cfg.gate.decision_threshold), self.tol)
 
     def gate(self, m):
         g = self.cfg.gate
@@ -362,7 +379,7 @@ class DefinitorTask:
         return passed, degraded
 
     def metric_fields(self):
-        return ['recall', 'precision', 'iou', 'dice', 'img_recall_min']
+        return ['recall', 'precision', 'strict_recall', 'strict_precision', 'iou', 'dice', 'img_recall_min']
 
     def short(self, m):
         return (f"recall {_f(m.get('recall'))} precision {_f(m.get('precision'))} iou {_f(m.get('iou'))}"
@@ -370,26 +387,44 @@ class DefinitorTask:
 
 
 class _SegAcc:
-    def __init__(self, thr):
-        self.thr = thr
-        self.tp = self.fp = self.fn = 0
+    """Pixel counts pooled over images. With boundary tolerance t > 0, pixels within t px of the
+    true mask edge are not counted at all (the hand-drawn edge is uncertain by about that much);
+    strict (untolerant) recall/precision are reported too."""
+
+    def __init__(self, thr, tol=0):
+        self.thr, self.tol = thr, tol
+        self.c = {'tp': 0, 'fp': 0, 'fn': 0, 'stp': 0, 'sfp': 0, 'sfn': 0}
         self.img_rec = []
 
     def add(self, logits, y):
         p = torch.sigmoid(logits.float()) >= self.thr
         t = y >= 0.5
-        tp = (p & t).sum((1, 2, 3)); fp = (p & ~t).sum((1, 2, 3)); fn = (~p & t).sum((1, 2, 3))
-        self.tp += int(tp.sum()); self.fp += int(fp.sum()); self.fn += int(fn.sum())
-        pos = (tp + fn)
-        self.img_rec += [(a / b) for a, b in zip(tp.tolist(), pos.tolist()) if b > 0]
+        valid = torch.ones_like(t)
+        if self.tol > 0:
+            k = 2 * self.tol + 1
+            tf = t.float()
+            dil = F.max_pool2d(tf, k, 1, self.tol) > 0.5
+            ero = -F.max_pool2d(-tf, k, 1, self.tol) > 0.5
+            valid = ~(dil & ~ero)
+        tp = (p & t & valid).sum((1, 2, 3)); fp = (p & ~t & valid).sum((1, 2, 3)); fn = (~p & t & valid).sum((1, 2, 3))
+        c = self.c
+        c['tp'] += int(tp.sum()); c['fp'] += int(fp.sum()); c['fn'] += int(fn.sum())
+        c['stp'] += int((p & t).sum()); c['sfp'] += int((p & ~t).sum()); c['sfn'] += int((~p & t).sum())
+        self.img_rec += [(a / b) for a, b in zip(tp.tolist(), (tp + fn).tolist()) if b > 0]
 
-    def result(self):
-        tp, fp, fn = self.tp, self.fp, self.fn
+    @staticmethod
+    def _rp(tp, fp, fn):
         rec = tp / (tp + fn) if tp + fn else float('nan')
         prec = tp / (tp + fp) if tp + fp else (float('nan') if tp + fn == 0 else 0.0)
-        m = {'recall': rec, 'precision': prec,
-             'iou': tp / (tp + fp + fn) if tp + fp + fn else float('nan'),
-             'dice': 2 * tp / (2 * tp + fp + fn) if tp + fp + fn else float('nan'),
+        return rec, prec
+
+    def result(self):
+        c = self.c
+        rec, prec = self._rp(c['tp'], c['fp'], c['fn'])
+        srec, sprec = self._rp(c['stp'], c['sfp'], c['sfn'])
+        s = c['stp'] + c['sfp'] + c['sfn']
+        m = {'recall': rec, 'precision': prec, 'strict_recall': srec, 'strict_precision': sprec,
+             'iou': c['stp'] / s if s else float('nan'), 'dice': 2 * c['stp'] / (s + c['stp']) if s else float('nan'),
              'img_recall_min': min(self.img_rec) if self.img_rec else float('nan')}
         m['gate_main'], m['gate_recall'] = prec, rec
         return m

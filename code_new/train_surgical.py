@@ -19,6 +19,7 @@ Outputs (training-runs/<run.name>/):
 """
 import argparse
 import csv
+import math
 import os
 import random
 import shutil
@@ -97,16 +98,19 @@ class Bundle:
         log(f"[data] {len(self.samples)} samples, {len({s.group for s in self.samples})} patients, "
             f"folds {[len(f) for f in self.folds]}, test {len(self.test_idx)}"
             + (f", cached in {time.time() - t0:.1f}s" if cfg.preprocess.get('cache_images', True) else ''))
-        tr = cfg.training
-        nw = int(tr.num_workers)
-        common = dict(batch_size=int(tr.batch_size), num_workers=nw, pin_memory=device.type == 'cuda',
-                      persistent_workers=nw > 0)
+        self.cfg, self.task, self.device = cfg, task, device
         self.train_sampler = D.SettableSampler(shuffle=True, seed=int(cfg.run.seed))
         self.eval_sampler = D.SettableSampler(shuffle=False, seed=0)
-        self.train_loader = DataLoader(D_dataset(self.samples, self.store, task, True), sampler=self.train_sampler,
-                                       **common)
-        self.eval_loader = DataLoader(D_dataset(self.samples, self.store, task, False), sampler=self.eval_sampler,
-                                      **common)
+        self.set_batch(int(cfg.training.batch_size))
+
+    def set_batch(self, bs):
+        self.batch_size = bs
+        nw = int(self.cfg.training.num_workers)
+        common = dict(batch_size=bs, num_workers=nw, pin_memory=self.device.type == 'cuda', persistent_workers=nw > 0)
+        self.train_loader = DataLoader(D_dataset(self.samples, self.store, self.task, True),
+                                       sampler=self.train_sampler, **common)
+        self.eval_loader = DataLoader(D_dataset(self.samples, self.store, self.task, False),
+                                      sampler=self.eval_sampler, **common)
 
 
 def D_dataset(samples, store, task, train):
@@ -114,32 +118,76 @@ def D_dataset(samples, store, task, train):
     return _TaskDataset(samples, store, task.item, train)
 
 
-def train_fold(model, task, b, indices, opt, scaler, device, use_amp, cfg, pass_info, selection):
+class LrControl:
+    """Per-group learning rates: encoder (pretrained) = lr, new layers = lr * new_layers_lr_mult.
+    Linear warm-up over the first warmup_steps optimizer steps of every new optimizer
+    (start, after a cut, after a retry)."""
+
+    def __init__(self, cfg):
+        self.mult = float(cfg.training.get('new_layers_lr_mult', 1.0))
+        self.warmup = int(cfg.training.get('warmup_steps', 0))
+        self.steps = 0
+
+    def reset(self):
+        self.steps = 0
+
+    def apply(self, opt, lr):
+        scale = min(1.0, (self.steps + 1) / self.warmup) if self.warmup > 0 else 1.0
+        for g in opt.param_groups:
+            g['lr'] = lr * (self.mult if g.get('name') == 'new' else 1.0) * scale
+        self.steps += 1
+
+
+def is_oom(e):
+    return isinstance(e, torch.cuda.OutOfMemoryError) or 'out of memory' in str(e).lower()
+
+
+def train_fold(model, task, b, indices, opt, scaler, device, use_amp, cfg, pass_info, selection, lr, lrc, accum):
     model.train()
     b.train_sampler.set(indices)
     l2 = cfg.surgical.penalty_mode == 'l2' and pass_info['apply_penalty'] and selection
     lam = pass_info['penalty'] * float(cfg.surgical.l2_scale)
     clip = float(cfg.training.grad_clip)
-    total, n = 0.0, 0
-    for _ in range(int(cfg.folds.repeats_per_step)):
+    eff = b.batch_size * accum
+    repeats = int(cfg.folds.repeats_per_step)
+    min_steps = int(cfg.folds.get('min_steps_per_step', 0))
+    if min_steps and indices:
+        repeats = max(repeats, math.ceil(min_steps * eff / len(indices)))
+    total, n, micro, opt_steps = 0.0, 0, 0, 0
+
+    def step():
+        nonlocal opt_steps
+        lrc.apply(opt, lr)
+        if clip > 0:
+            scaler.unscale_(opt)
+            nn.utils.clip_grad_norm_(model.parameters(), clip)
+        scaler.step(opt)
+        scaler.update()
+        opt.zero_grad(set_to_none=True)
+        opt_steps += 1
+
+    opt.zero_grad(set_to_none=True)
+    fake_limit = int(os.environ.get('SURGICAL_TEST_OOM', 0))       # test hook: pretend the GPU holds N images
+    if fake_limit and b.batch_size > fake_limit:
+        raise RuntimeError(f'CUDA out of memory (simulated: SURGICAL_TEST_OOM={fake_limit})')
+    for _ in range(repeats):
         for x, y, _ in b.train_loader:
-            if x.shape[0] < 2 and n > 0:           # a 1-sample tail batch adds noise only
+            if x.shape[0] < 2 <= b.batch_size and n > 0:     # a 1-sample tail batch adds noise only
                 continue
             x = x.to(device, non_blocking=True); y = y.to(device, non_blocking=True)
-            opt.zero_grad(set_to_none=True)
             with torch.autocast(device.type, dtype=torch.float16, enabled=use_amp):
                 logits = model(x)
             loss = task.loss(logits, y).mean()
             if l2:
                 loss = loss + lam * S.l2_penalty(model, selection)
-            scaler.scale(loss).backward()
-            if clip > 0:
-                scaler.unscale_(opt)
-                nn.utils.clip_grad_norm_(model.parameters(), clip)
-            scaler.step(opt)
-            scaler.update()
+            scaler.scale(loss / accum).backward()
+            micro += 1
+            if micro % accum == 0:
+                step()
             total += loss.item() * x.shape[0]; n += x.shape[0]
-    return total / max(1, n)
+    if micro % accum:
+        step()
+    return total / max(1, n), opt_steps
 
 
 @torch.no_grad()
@@ -147,7 +195,7 @@ def evaluate(model, task, b, indices, device, use_amp, acc, tracker=None):
     """Adds predictions to `acc`; per-sample losses go to the mistake tracker. Returns mean loss."""
     model.eval()
     b.eval_sampler.set(indices)
-    losses = []
+    losses, paths, errs = [], [], []
     for x, y, idx in b.eval_loader:
         x = x.to(device, non_blocking=True); y = y.to(device, non_blocking=True)
         with torch.autocast(device.type, dtype=torch.float16, enabled=use_amp):
@@ -156,13 +204,19 @@ def evaluate(model, task, b, indices, device, use_amp, acc, tracker=None):
         acc.add(logits, y)
         losses += per.tolist()
         if tracker is not None:
-            tracker.update([b.samples[i].path for i in idx.tolist()], task.sample_error(logits, y).tolist())
+            paths += [b.samples[i].path for i in idx.tolist()]
+            errs += task.sample_error(logits, y).tolist()
+    if tracker is not None:
+        tracker.update(paths, errs)
     return float(np.mean(losses)) if losses else float('nan')
 
 
 def make_optimizer(model, cfg, lr):
+    """AdamW, two groups: pretrained encoder and newly initialised layers (see LrControl)."""
     tr = cfg.training
-    return torch.optim.Adam(model.parameters(), lr=lr, betas=tuple(tr.betas), weight_decay=float(tr.weight_decay))
+    enc, new = model.param_groups()
+    return torch.optim.AdamW([{'params': enc, 'name': 'enc'}, {'params': new, 'name': 'new'}], lr=lr,
+                             betas=tuple(tr.betas), weight_decay=float(tr.weight_decay))
 
 
 def model_file(model, cfg, task, extra):
@@ -217,6 +271,11 @@ def main():
     selection, pass_info, pass_buf = {}, None, {'loss': [], 'extra': 0}
     last_accepted, orig_params, step = None, None, 0
     lr = accepted_lr = float(cfg.training.lr)
+    lrc = LrControl(cfg)
+    phys_batch = int(cfg.training.batch_size)
+    eff_batch = int(cfg.training.get('effective_batch_size') or phys_batch)
+    accum = max(1, round(eff_batch / phys_batch))
+    plateau = {'best': float('inf'), 'wait': 0}
 
     if args.resume:
         st = torch.load(state_path, map_location='cpu', weights_only=False)
@@ -226,6 +285,9 @@ def main():
         selection, pass_info, pass_buf = st['selection'], st['pass_info'], st['pass_buf']
         last_accepted, orig_params, step, lr = st['last_accepted'], st['orig_params'], st['step'], st['lr']
         accepted_lr = st.get('accepted_lr', lr)
+        phys_batch, accum = st.get('phys_batch', phys_batch), st.get('accum', accum)
+        plateau = st.get('plateau', plateau)
+        lrc.steps = st.get('lr_steps', 0)
         log(f"resumed: pass {rotation.total_passes} step {step} cycle {schedule.cycle} phase {schedule.phase}")
     else:
         if cfg.model.init == 'checkpoint':
@@ -245,10 +307,13 @@ def main():
             scaler.load_state_dict(st['scaler'])
     log(f"model: {type(model).__name__} params={count_params(model):,} "
         f"({count_params(model) / orig_params:.1%} of start)")
+    log(f"batch: {phys_batch} x {accum} accumulation = {phys_batch * accum} per optimizer step; lr {lr:.2e} "
+        f"(new layers x{lrc.mult:g}), weight decay {float(cfg.training.weight_decay):g}")
 
     mf = task.metric_fields()
     pass_log = CsvLog(run_dir / 'log.csv', ['time', 'pass', 'cycle', 'phase', 'dataset', 'dropout', 'penalty',
-                                            'holding', 'lr', 'params', 'param_ratio', 'loss', 'test_loss',
+                                            'holding', 'lr', 'batch', 'params', 'param_ratio', 'loss', 'test_loss',
+                                            'gate_source', 'overfit_gap',
                                             'replay_extra', 'gate_passed', 'sel_norm_ratio', 'action']
                       + [f'fold_{k}' for k in mf] + [f'test_{k}' for k in mf])
     step_log = CsvLog(run_dir / 'steps.csv', ['time', 'step', 'pass', 'dataset', 'train_fold', 'test_fold',
@@ -260,6 +325,8 @@ def main():
         if i not in bundles:
             bundles.clear()
             bundles[i] = Bundle(cfg, task, datasets[i], run_dir, device, log)
+            if bundles[i].batch_size != phys_batch:
+                bundles[i].set_batch(phys_batch)
         return bundles[i]
 
     def save_state():
@@ -268,7 +335,8 @@ def main():
                      'rotation': rotation.state_dict(), 'schedule': schedule.state_dict(),
                      'tracker': tracker.state_dict(), 'selection': selection, 'pass_info': pass_info,
                      'pass_buf': pass_buf, 'last_accepted': last_accepted, 'orig_params': orig_params,
-                     'step': step, 'lr': lr, 'accepted_lr': accepted_lr}, state_path)
+                     'step': step, 'lr': lr, 'accepted_lr': accepted_lr, 'phys_batch': phys_batch, 'accum': accum,
+                     'plateau': plateau, 'lr_steps': lrc.steps}, state_path)
 
     done, reason = False, ''
     fold_acc = task.new_accumulator()
@@ -284,18 +352,34 @@ def main():
                     log(f"[cycle {schedule.cycle}] dropout reached {pass_info['dropout']:.2f}: selected "
                         f"{sum(len(v) for v in selection.values())} units to cut (ratio {schedule.cut_ratio:.3f}): "
                         + ', '.join(f"{k}:{len(v)}" for k, v in selection.items()))
-                pass_buf = {'loss': [], 'extra': 0}
+                pass_buf = {'loss': [], 'extra': 0, 'tloss': []}
                 fold_acc = task.new_accumulator()
                 t_pass = time.time()
 
             ds_i, tr_f, te_f = rotation.current()                    # ── one fold step
             b = bundle(ds_i)
             train_idx, extra = tracker.expand(b.folds[tr_f], b.samples)
-            loss = train_fold(model, task, b, train_idx, opt, scaler, device, use_amp, cfg, pass_info, selection)
+            while True:                                               # retry the step with a smaller batch on OOM
+                try:
+                    loss, _ = train_fold(model, task, b, train_idx, opt, scaler, device, use_amp, cfg, pass_info,
+                                         selection, lr, lrc, accum)
+                    break
+                except RuntimeError as e:
+                    if not is_oom(e) or phys_batch <= 1:
+                        raise
+                    opt.zero_grad(set_to_none=True)
+                    if device.type == 'cuda':
+                        torch.cuda.empty_cache()
+                    phys_batch //= 2
+                    accum *= 2
+                    b.set_batch(phys_batch)
+                    log(f"[memory] out of memory -> batch {phys_batch} x {accum} accumulation "
+                        f"(same {phys_batch * accum} per optimizer step); repeating this step")
             step_acc = task.new_accumulator()
             test_loss = evaluate(model, task, b, b.folds[te_f], device, use_amp, _Both(step_acc, fold_acc), tracker)
             sm = step_acc.result()
             pass_buf['loss'].append(loss); pass_buf['extra'] += extra
+            pass_buf.setdefault('tloss', []).append(test_loss)
             step += 1
             step_log.row(time=datetime.now().isoformat(timespec='seconds'), step=step,
                          **{'pass': rotation.total_passes + 1}, dataset=b.name, train_fold=tr_f, test_fold=te_f,
@@ -317,14 +401,33 @@ def main():
                     ta = task.new_accumulator()
                     t_loss = evaluate(model, task, b, b.test_idx, device, use_amp, ta)
                     tm = ta.result()
-                gm = tm if cfg.gate.source == 'test' and tm else fm
+                g_src = 'test' if cfg.gate.source == 'test' and tm else 'folds'
+                gm = tm if g_src == 'test' else fm
                 passed, degraded = task.gate(gm)
+                gap = (fm.get('gate_recall', float('nan')) - tm.get('gate_recall', float('nan'))) if tm else float('nan')
+                # reduce-on-plateau of the gate-source loss, learn phase only
+                if schedule.phase == 'learn':
+                    cur = t_loss if g_src == 'test' else float(np.mean(pass_buf['tloss'])) if pass_buf.get('tloss') else float('nan')
+                    if not math.isnan(cur):
+                        if cur < plateau['best'] * (1 - float(cfg.training.get('plateau_min_delta', 0.01))):
+                            plateau['best'], plateau['wait'] = cur, 0
+                        else:
+                            plateau['wait'] += 1
+                            if plateau['wait'] >= int(cfg.training.get('plateau_passes', 12)) and \
+                                    plateau.get('cuts', 0) < int(cfg.training.get('plateau_max_reductions', 3)) and \
+                                    lr > float(cfg.training.lr_min):
+                                lr = max(float(cfg.training.lr_min), lr * float(cfg.training.get('plateau_factor', 0.5)))
+                                plateau['wait'], plateau['cuts'] = 0, plateau.get('cuts', 0) + 1
+                                log(f"[lr] no improvement for {cfg.training.get('plateau_passes', 12)} passes -> "
+                                    f"lr {lr:.2e} (reduction {plateau['cuts']} of "
+                                    f"{cfg.training.get('plateau_max_reductions', 3)} in this phase)")
                 phase_before, cycle_before = schedule.phase, schedule.cycle
                 action = schedule.end_pass(passed, degraded)
                 params = count_params(model)
                 pass_log.row(time=datetime.now().isoformat(timespec='seconds'), **{'pass': rotation.total_passes},
                              cycle=cycle_before, phase=phase_before, dataset=b.name, dropout=pass_info['dropout'],
-                             penalty=pass_info['penalty'], holding=int(pass_info['holding']), lr=lr, params=params,
+                             penalty=pass_info['penalty'], holding=int(pass_info['holding']), lr=lr,
+                             batch=f"{phys_batch}x{accum}", gate_source=g_src, overfit_gap=gap, params=params,
                              param_ratio=params / orig_params, loss=float(np.mean(pass_buf['loss'])),
                              test_loss=t_loss, replay_extra=pass_buf['extra'], gate_passed=int(passed),
                              sel_norm_ratio=sel_ratio, action=action,
@@ -335,7 +438,9 @@ def main():
                     + (f" | test {task.short(tm)}" if tm else '')
                     + f" | gate {'OK' if passed else '--'} | drop {pass_info['dropout']:.2f} "
                       f"pen {pass_info['penalty']:.3f}" + (f" | sel/kept |w| {sel_ratio:.3f}" if selection else '')
-                    + (f" | replay +{pass_buf['extra']}" if pass_buf['extra'] else '') + f" -> {action}")
+                    + (f" | replay +{pass_buf['extra']}" if pass_buf['extra'] else '')
+                    + (f" | suspect labels {tracker.n_suspect()}" if tracker.n_suspect() else '')
+                    + (f" | fold-test recall gap {gap:+.3f}" if not math.isnan(gap) else '') + f" -> {action}")
 
                 if action == 'accept':
                     path = run_dir / 'accepted' / f"cycle_{schedule.cycle:02d}.pth"
@@ -357,8 +462,9 @@ def main():
                     model = S.cut(model, selection).to(device)
                     selection = {}
                     schedule.after_cut()
-                    lr = max(float(cfg.training.lr_min), lr * float(cfg.training.lr_cycle_decay))
-                    opt = make_optimizer(model, cfg, lr)
+                    lr = max(float(cfg.training.lr_min), accepted_lr * float(cfg.training.lr_cycle_decay))
+                    opt = make_optimizer(model, cfg, lr); lrc.reset()
+                    plateau = {'best': float('inf'), 'wait': 0}
                     after = count_params(model)
                     log(f"[cycle {schedule.cycle}] CUT: {before:,} -> {after:,} params ({after / orig_params:.1%} "
                         f"of start), lr {lr:.2e}")
@@ -373,7 +479,8 @@ def main():
                         selection = {}
                         if schedule.retry_smaller():
                             lr = accepted_lr
-                            opt = make_optimizer(model, cfg, lr)
+                            opt = make_optimizer(model, cfg, lr); lrc.reset()
+                            plateau = {'best': float('inf'), 'wait': 0}
                             log(f"  retry {schedule.retries} with cut ratio {schedule.cut_ratio:.3f}")
                         else:
                             done, reason = True, "recovery failed and no retry left"

@@ -35,11 +35,15 @@ model:
   init: vgg16                           # vgg16 | checkpoint | scratch (old 16_01_2026 *.pth also loads)
   base: 64
   hidden: 64
+  head: gap                             # gap: global average pooling -> fc (512x64 weights)
+                                        # flatten: old layout (32768x64 weights in fc.0)
 
 training:
   batch_size: 16
+  effective_batch_size: 16
   num_workers: 2
-  lr: 1.0e-4
+  lr: 1.0e-4                            # VGG encoder (fine-tuning)
+  new_layers_lr_mult: 10                # intermediate conv + fc start from random: 1e-3
   pos_weight: [2.0, 2.0, 1.0]           # BCE weight of positives per label (pushes recall up)
 
 gate:
