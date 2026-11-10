@@ -254,6 +254,30 @@ def test_enhance():
     print("enhance (HSV-S + CLAHE, border kept black): ok")
 
 
+def test_disc_crop():
+    from surgical import disc_crop as C
+    H = W = 400
+    yy, xx = np.mgrid[0:H, 0:W]
+    rgb = np.zeros((H, W, 3), np.uint8)
+    rgb[(yy - 200) ** 2 + (xx - 200) ** 2 < 195 ** 2] = [180, 80, 40]
+    for cx, want in ((200, 1.0), (40, None)):              # centred disc, disc cut by the photo edge
+        mask = (((yy - 200) ** 2 + (xx - cx) ** 2) < 60 ** 2).astype(np.uint8) * 255
+        img = rgb.copy()
+        if cx == 40:
+            img[:, :] = [180, 80, 40]                        # retina reaches the photo edge
+        info = C.analyse(img, mask)
+        c, _ = C.crop(img, info)
+        assert c.shape == (256, 256, 3)
+        assert abs(info.diameter_px - 120) < 4, info
+        if want:
+            assert info.status == 'ok' and info.completeness == 1.0
+        else:
+            # visible part of a circle of r 60 whose centre is 40 px from the edge: ~75 %
+            assert info.status == 'partial' and 0.65 < info.completeness < 0.85, info
+    assert C.analyse(rgb, np.zeros((H, W), np.uint8)).status == 'no_disc'
+    print("disc crop: centred ok, cut disc -> partial, no mask -> no_disc")
+
+
 if __name__ == '__main__':
     for name, fn in list(globals().items()):
         if name.startswith('test_'):
