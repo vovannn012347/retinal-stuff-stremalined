@@ -23,8 +23,17 @@ set "PY=%VENV%\Scripts\python.exe"
 "%PY%" -m pip install --upgrade pip
 if errorlevel 1 goto :fail
 
-rem On Windows the PyPI torch wheel is the CPU build (no CUDA download).
-"%PY%" -m pip install --upgrade torch torchvision
+rem NVIDIA GPU present -> CUDA 12.6 build (runs on any driver that supports CUDA 12, >= 528);
+rem otherwise the PyPI wheel, which on Windows is the CPU build.
+where nvidia-smi >nul 2>nul
+if not errorlevel 1 (
+    echo [setup] NVIDIA GPU found - installing the CUDA build of torch
+    nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
+    "%PY%" -m pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu126
+) else (
+    echo [setup] no NVIDIA GPU found - installing the CPU build of torch
+    "%PY%" -m pip install --upgrade torch torchvision
+)
 if errorlevel 1 goto :fail
 
 "%PY%" -m pip install -r code_new\requirements.txt
