@@ -1,7 +1,7 @@
-# Definitor on a PC without a usable GPU (CPU only).
-# The full model at 512 px would take ~10+ minutes per pass on a CPU; this profile is ~5-6x faster:
-# smaller input (disc still ~75 px across) and fewer optimizer steps per fold step.
-# The heavy 512 px run belongs on the CUDA machine (definitor_gpu.yaml).
+# Definitor on a PC without a usable GPU (CPU only), set up like the old definitor trainer:
+#   old: images loaded at 576 and halved -> the network ran at 288 x 288, batch 4 (no accumulation),
+#        10 folds, Adam, grayscale + flips, full-size network (base 64)
+# One pass here costs about what one old epoch did (every training image once, ~55 optimizer steps).
 extends: definitor_base.yaml
 
 run:
@@ -12,15 +12,16 @@ device:
   cpu_threads: 0            # all cores - leave the PC alone while it runs
 
 preprocess:
-  size: 320                 # divisible by 16; prepared 512 px images are scaled down on load
+  size: 288                 # = the old trainer's working size (576 / 2)
 
 gate:
-  boundary_tolerance_px: 1  # ~0.6 of the 512 px scale
+  boundary_tolerance_px: 1  # 2 px at 576 = 1 px at 288
 
 training:
   batch_size: 4
-  effective_batch_size: 8
+  effective_batch_size: 4   # one optimizer step per batch, as in the old trainer
   num_workers: 0
 
 folds:
-  min_steps_per_step: 10
+  k: 10                     # old trainer: KFold(10)
+  min_steps_per_step: 0     # a pass already gives ~55 optimizer steps; no extra sweeps
