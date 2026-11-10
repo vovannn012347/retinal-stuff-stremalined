@@ -17,8 +17,9 @@ Outputs (training-runs/<run.name>/):
                             --resume falls back to them automatically if state_last.pth is damaged
     log.csv / steps.csv     one row per pass / per fold step
     mistakes.csv            samples ordered by error (what mistake replay repeats)
-    samples/pass_NNNN.png   definitor: predicted masks on fixed held-out images + the current worst
-                            mistakes (every logging.sample_every_passes passes); accepted_cycle_XX.png
+    samples/pass_NNNN_images.png + pass_NNNN_masks.png   definitor: inputs and predicted masks (white on
+                            black) of fixed held-out images + the current worst mistakes, same grid;
+                            every logging.sample_every_passes passes; accepted_cycle_XX_* at each accept
     events.log              everything printed
     split_<dataset>.json    patient folds + held-out test patients
 """

@@ -392,12 +392,11 @@ class DefinitorTask:
 
     @torch.no_grad()
     def render_samples(self, model, samples, store, indices, device, out_path, title=''):
-        """One PNG: per image [input as the network sees it | prediction]. Prediction panel:
-        red = predicted probability, yellow line = cleaned mask (what the pipeline keeps),
-        green line = true mask. Caption: per-image recall / precision of the cleaned mask."""
+        """One PNG: per image [input as the network sees it | raw definitor output], the output is the
+        probability 0..1 shown as black..white, nothing drawn on top. Caption: per-image recall /
+        precision of the cleaned mask (what the pipeline keeps)."""
         from PIL import ImageDraw
         from .disc_crop import clean_mask
-        import cv2
         model.eval()
         g = self.cfg.gate
         thr, open_frac = float(g.decision_threshold), float(g.get('open_frac', 0.03))
@@ -406,22 +405,15 @@ class DefinitorTask:
         for i in indices:
             s = samples[i]
             x, y = self.item(store.get(s), s, False)
-            prob = torch.sigmoid(model(x[None].to(device)).float())[0, 0].cpu().numpy()
+            prob = torch.sigmoid(model(x[None].to(device)).float())[0, 0].clamp(0, 1).cpu().numpy()
             img = np.ascontiguousarray(((x.permute(1, 2, 0).numpy() + 1) * 127.5).clip(0, 255).astype(np.uint8))
+            out = np.repeat((prob * 255).round().astype(np.uint8)[..., None], 3, axis=2)
             t = y[0].numpy() > 0.5
             c = clean_mask(prob >= thr, open_frac)
-            over = img.astype(np.float32)
-            over[..., 0] = over[..., 0] * (1 - prob) + 255 * prob
-            over[..., 1:] *= (1 - 0.6 * prob[..., None])
-            over = np.ascontiguousarray(over.clip(0, 255).astype(np.uint8))
-            for m, col in ((c, (255, 230, 0)), (t, (0, 255, 0))):
-                cnts, _ = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-                cv2.drawContours(over, cnts, -1, col, 1)
             tp, fn, fp = int((c & t).sum()), int((~c & t).sum()), int((c & ~t).sum())
             rec = f"{tp / (tp + fn):.2f}" if tp + fn else "no disc"
             prec = f"{tp / (tp + fp):.2f}" if tp + fp else "-"
-            row = np.concatenate([img, over], 1)
-            pil = Image.fromarray(row)
+            pil = Image.fromarray(np.concatenate([img, out], 1))
             ImageDraw.Draw(pil).text((4, 3), f"{Path(s.path).stem}  recall {rec}  precision {prec}",
                                      fill=(255, 255, 255), font=font)
             rows.append(np.asarray(pil))
@@ -430,10 +422,18 @@ class DefinitorTask:
         cols = 2 if len(rows) > 3 else 1
         while len(rows) % cols:
             rows.append(np.zeros_like(rows[0]))
-        grid = np.concatenate([np.concatenate(rows[r:r + cols], 1) for r in range(0, len(rows), cols)], 0)
+        sep = np.full((rows[0].shape[0], 4, 3), 64, np.uint8)            # thin grey gap between pairs
+        lines = []
+        for r in range(0, len(rows), cols):
+            parts = []
+            for j, im in enumerate(rows[r:r + cols]):
+                parts += ([sep] if j else []) + [im]
+            lines.append(np.concatenate(parts, 1))
+        gap = np.full((4, lines[0].shape[1], 3), 64, np.uint8)
+        grid = np.concatenate([x for ln in lines for x in (ln, gap)][:-1], 0)
         head = np.zeros((18, grid.shape[1], 3), np.uint8)
         pil = Image.fromarray(np.concatenate([head, grid], 0))
-        ImageDraw.Draw(pil).text((4, 2), title + "   red = probability, yellow = cleaned mask, green = true mask",
+        ImageDraw.Draw(pil).text((4, 2), title + "   left: input, right: definitor output (black 0 .. white 1)",
                                  fill=(255, 255, 255), font=font)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         pil.save(out_path)
