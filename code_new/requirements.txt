@@ -4,4 +4,5 @@
 numpy>=1.24
 pillow>=10.0
 pyyaml>=6.0
+opencv-python>=4.8       # prepare_definitor_inputs.py (CLAHE / HSV); the executor ships 4.9
 matplotlib>=3.7          # plot_log.py only

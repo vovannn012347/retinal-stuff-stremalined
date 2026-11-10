@@ -6,19 +6,23 @@ run:
   name: definitor_v1
 
 # Each dataset = an image folder + a mask folder. Masks are matched by name:
-#   images/015МЛФ01.jpg  <->  masks/015МЛФ01.mask.jpg   (any image extension on both sides)
+#   images/015МЛФ01.png  <->  masks/015МЛФ01.mask.png   (any image extension on both sides)
+# The default is the output of prepare_definitor_inputs.py (border cropped, HSV-S equalised,
+# CLAHE-LAB, 512 x 512) - run it first:   python code_new/prepare_definitor_inputs.py
 datasets:
   - name: local_definitor_v1
-    images: training-data/source-input/input_for_definitor
-    masks: training-data/eye-nerve-definitor/training-masks
+    images: training-data/eye-nerve-definitor/prepared_512/images
+    masks: training-data/eye-nerve-definitor/prepared_512/masks
 
 group_regex: null                       # patient key override (regex with one group)
 
 preprocess:
-  size: 576                             # input is size x size, must be divisible by 16 (old trainer: 576)
+  size: 512                             # input is size x size, divisible by 16; = the prepared images
+                                        # (disc ~120 px across at 512 - enough for the mask)
   crop_to_retina: true                  # crop the black border away first (same box for the mask)
   black_level: 10                       # grey level that still counts as border
   grayscale: true                       # the old trainer fed grey images (RandomGreyscale p=1)
+                                        # colour enhancement is done beforehand by prepare_definitor_inputs.py
   cache_images: true
 
 augmentation:                           # geometric ones applied to image and mask together

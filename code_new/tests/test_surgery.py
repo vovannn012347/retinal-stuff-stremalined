@@ -237,6 +237,23 @@ def test_mistake_replay():
     print("mistake replay: ok", idx)
 
 
+def test_enhance():
+    from surgical import enhance as E
+    rng = np.random.default_rng(0)
+    yy, xx = np.mgrid[0:96, 0:96]
+    img = np.zeros((96, 96, 3), np.uint8)
+    inside = (yy - 48) ** 2 + (xx - 48) ** 2 < 40 ** 2
+    img[inside] = np.clip(np.array([200, 90, 40]) + rng.normal(0, 15, (inside.sum(), 3)), 0, 255).astype(np.uint8)
+    out = E.enhance(img)
+    assert out.shape == img.shape and out.dtype == np.uint8
+    assert out[~inside].max() == 0                       # border stays black
+    s_in = __import__('cv2').cvtColor(img, __import__('cv2').COLOR_RGB2HSV)[..., 1][inside].std()
+    s_out = __import__('cv2').cvtColor(out, __import__('cv2').COLOR_RGB2HSV)[..., 1][inside].std()
+    assert s_out > s_in                                  # saturation spread out
+    assert E.retina_box(img) == (8, 9, 88, 88) or E.retina_box(img)[0] <= 9
+    print("enhance (HSV-S + CLAHE, border kept black): ok")
+
+
 if __name__ == '__main__':
     for name, fn in list(globals().items()):
         if name.startswith('test_'):
