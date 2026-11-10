@@ -96,10 +96,10 @@ datasets:
 preprocess: {{size: 32}}
 augmentation: {{randaug_magnitude: 0, rotation_degrees: 0, color_jitter: [0, 0, 0, 0]}}
 folds: {{k: 3, passes_per_dataset: 3, test_fraction: 0.1}}
-model: {{init: scratch, base: 8, hidden: 16}}
+model: {{init: scratch, base: 16, hidden: 32}}
 training: {{batch_size: 16, effective_batch_size: 16, num_workers: 0, lr: 3.0e-3, new_layers_lr_mult: 1,
            pos_weight: [1.0, 1.0, 1.0], warmup_steps: 5}}
-surgical: {{min_learn_passes: 2, max_learn_passes: 80, max_recover_passes: 40, max_cycles: 2,
+surgical: {{min_learn_passes: 2, max_learn_passes: 200, max_recover_passes: 60, max_cycles: 2,
            cut_ratio: 0.25, min_channels: 2, target_param_ratio: 0.01}}
 logging: {{print_every_steps: 1000}}
 """, encoding='utf-8')
@@ -140,8 +140,14 @@ logging: {{print_every_steps: 1000}}
 """, encoding='utf-8')
     train = CODE / 'train_surgical.py'
     assert run([train, '--config', cfg, '--max-steps', 10], tmp) == 0
-    assert run([train, '--config', cfg, '--resume'], tmp) == 0
     rd = tmp / 'runs' / 'deff'
+    assert list((rd / 'backups').glob('state_pass_*.pth')), 'no backup written'
+    # simulate a hard crash in the middle of writing state_last.pth: resume must fall back to a backup
+    data = (rd / 'state_last.pth').read_bytes()
+    (rd / 'state_last.pth').write_bytes(data[:len(data) // 3])
+    assert run([train, '--config', cfg, '--resume'], tmp) == 0
+    assert 'resuming from backup' in (rd / 'events.log').read_text(encoding='utf-8')
+    assert len(list((rd / 'backups').glob('state_pass_*.pth'))) <= 5
     check_run(rd, ['dd_a', 'dd_b'])
     assert run([CODE / 'evaluate.py', '--config', cfg, '--model', rd / 'final_model.pth',
                 '--split', rd / 'split_dd_a.json'], tmp) == 0

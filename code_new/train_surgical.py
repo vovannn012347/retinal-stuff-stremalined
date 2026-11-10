@@ -6,12 +6,15 @@ and mistake replay. One trainer for both steps (config key `task`):
 
     python code_new/train_surgical.py --config code_new/configs/definitor_gpu.yaml
     python code_new/train_surgical.py --config code_new/configs/definitor_gpu.yaml --resume
+    python code_new/train_surgical.py --config ... --resume --resume-from training-runs/<run>/backups/state_pass_0012.pth
     python code_new/train_surgical.py --config code_new/configs/classifier_laptop.yaml --set run.name=try2
 
 Outputs (training-runs/<run.name>/):
     accepted/cycle_XX.pth   model that passed the gate after XX cuts (deployable)
     final_model.pth         the last accepted model
     state_last.pth          full resume point (written after every fold step)
+    backups/state_pass_*.pth  copies every logging.backup_every_passes passes (the newest backup_keep kept);
+                            --resume falls back to them automatically if state_last.pth is damaged
     log.csv / steps.csv     one row per pass / per fold step
     mistakes.csv            samples ordered by error (what mistake replay repeats)
     events.log              everything printed
@@ -77,9 +80,30 @@ def set_seed(seed):
 
 
 def atomic_save(obj, path: Path):
+    """write to a temp file, flush to disk, then rename: a crash mid-write never damages the old file"""
     tmp = path.with_suffix(path.suffix + '.tmp')
-    torch.save(obj, tmp)
+    with open(tmp, 'wb') as f:
+        torch.save(obj, f)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, path)
+
+
+def load_resume_state(run_dir: Path, explicit, log):
+    """state_last.pth, else the newest readable backup (after a hard crash the last write may be damaged)."""
+    cands = [Path(explicit)] if explicit else \
+        [run_dir / 'state_last.pth'] + sorted((run_dir / 'backups').glob('state_pass_*.pth'), reverse=True)
+    for p in cands:
+        if not p.is_file():
+            continue
+        try:
+            st = torch.load(p, map_location='cpu', weights_only=False)
+            if p.name != 'state_last.pth':
+                log(f"resuming from backup {p.name}")
+            return st
+        except Exception as e:                      # truncated / corrupted file
+            log(f"cannot read {p.name} ({type(e).__name__}: {e}) - trying an older one")
+    sys.exit(f"no readable training state in {run_dir} (state_last.pth / backups/)")
 
 
 class Bundle:
@@ -230,7 +254,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--config', required=True)
     ap.add_argument('--set', action='append', default=[], metavar='KEY=VALUE', help='override a config value')
-    ap.add_argument('--resume', action='store_true', help='continue from <run>/state_last.pth')
+    ap.add_argument('--resume', action='store_true', help='continue from <run>/state_last.pth (or the newest backup)')
+    ap.add_argument('--resume-from', metavar='PATH', help='with --resume: a specific state / backup file')
     ap.add_argument('--max-steps', type=int, default=0, help='stop after N fold steps (testing)')
     args = ap.parse_args()
 
@@ -241,7 +266,7 @@ def main():
         (out_root / '.gitignore').write_text('*\n', encoding='utf-8')
     run_dir = out_root / cfg.run.name
     state_path = run_dir / 'state_last.pth'
-    if state_path.exists() and not args.resume:
+    if (state_path.exists() or (run_dir / 'backups').is_dir()) and not args.resume:
         sys.exit(f"Run folder {run_dir} already has a training state. Use --resume to continue it "
                  f"or --set run.name=<new name> for a new run.")
     (run_dir / 'accepted').mkdir(parents=True, exist_ok=True)
@@ -278,7 +303,7 @@ def main():
     plateau = {'best': float('inf'), 'wait': 0}
 
     if args.resume:
-        st = torch.load(state_path, map_location='cpu', weights_only=False)
+        st = load_resume_state(run_dir, args.resume_from, log)
         model = load_from_state(st)
         rotation.load_state_dict(st['rotation']); schedule.load_state_dict(st['schedule'])
         tracker.load_state_dict(st.get('tracker', {}))
@@ -337,6 +362,19 @@ def main():
                      'pass_buf': pass_buf, 'last_accepted': last_accepted, 'orig_params': orig_params,
                      'step': step, 'lr': lr, 'accepted_lr': accepted_lr, 'phys_batch': phys_batch, 'accum': accum,
                      'plateau': plateau, 'lr_steps': lrc.steps}, state_path)
+
+    def backup_state():
+        every = int(cfg.logging.get('backup_every_passes', 0))
+        if every <= 0 or rotation.total_passes % every:
+            return
+        bdir = run_dir / 'backups'
+        bdir.mkdir(exist_ok=True)
+        dst = bdir / f"state_pass_{rotation.total_passes:04d}.pth"
+        tmp = dst.with_suffix('.pth.tmp')
+        shutil.copyfile(state_path, tmp)
+        os.replace(tmp, dst)
+        for old in sorted(bdir.glob('state_pass_*.pth'))[:-max(1, int(cfg.logging.get('backup_keep', 5)))]:
+            old.unlink()
 
     done, reason = False, ''
     fold_acc = task.new_accumulator()
@@ -405,9 +443,14 @@ def main():
                 gm = tm if g_src == 'test' else fm
                 passed, degraded = task.gate(gm)
                 gap = (fm.get('gate_recall', float('nan')) - tm.get('gate_recall', float('nan'))) if tm else float('nan')
-                # reduce-on-plateau of the gate-source loss, learn phase only
+                # reduce-on-plateau, learn phase only. Signal: the next-fold test loss of the pass (every
+                # sample once, far less noisy than the few held-out patients), smoothed over passes.
                 if schedule.phase == 'learn':
-                    cur = t_loss if g_src == 'test' else float(np.mean(pass_buf['tloss'])) if pass_buf.get('tloss') else float('nan')
+                    raw = float(np.nanmean(pass_buf['tloss'])) if pass_buf.get('tloss') else float('nan')
+                    if not math.isnan(raw):
+                        sm = plateau.get('ema')
+                        plateau['ema'] = raw if sm is None else 0.7 * sm + 0.3 * raw
+                    cur = plateau.get('ema', float('nan'))
                     if not math.isnan(cur):
                         if cur < plateau['best'] * (1 - float(cfg.training.get('plateau_min_delta', 0.01))):
                             plateau['best'], plateau['wait'] = cur, 0
@@ -490,6 +533,8 @@ def main():
 
             if cfg.logging.save_state_every_step or pass_done:
                 save_state()
+            if pass_done:
+                backup_state()
             if args.max_steps and step >= args.max_steps:
                 done, reason = True, f"--max-steps {args.max_steps}"
     except KeyboardInterrupt:

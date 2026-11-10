@@ -62,7 +62,7 @@ training-data/eye-nerve-definitor/training-masks/015МЛФ01.mask.jpg     (бу�
 **Пам'ять.**
 * `training.batch_size` — скільки картинок за раз іде в мережу; саме це має вмістити GPU або ПК.
 * `effective_batch_size` — скільки картинок на один крок оптимізатора. Градієнти накопичуються, тож маленький
-  batch вчиться як великий: definitor на ноуті 1 × 8, на GPU 4 × 8.
+  batch вчиться як великий: definitor на домашньому ПК 4 × 512² (накопичення до 8), на Ubuntu 4 × 576² (теж до 8).
 * Якщо CUDA пише «out of memory», batch сам зменшується вдвічі, накопичення подвоюється, і крок повторюється.
   Це видно в `events.log` (`[memory] ...`) і в колонці `batch` у `log.csv`.
 
@@ -71,7 +71,8 @@ training-data/eye-nerve-definitor/training-masks/015МЛФ01.mask.jpg     (бу�
   * classifier: 1e-4 та 1e-3;
   * definitor: 5e-5 та 2e-4.
 * Warm-up (50 кроків) після кожного нового оптимізатора: на старті, після вирізання, після retry.
-* Якщо втрата на тестових пацієнтах 12 проходів не покращується, lr ділиться навпіл (не більше 3 разів за фазу навчання).
+* Якщо згладжена втрата на «наступних згортках» 12 проходів не покращується, lr ділиться навпіл
+  (не більше 3 разів за фазу навчання). Втрата на відкладених пацієнтах для цього надто шумна: їх мало.
 * Підібрати lr на своїх даних: `python code_new/lr_find.py --config <конфіг>`. Скрипт друкує рекомендацію
   і малює `training-runs/lr_find_<run>/lr_find.png`. Запускати з тим самим `model.init`, що й тренування.
 * Definitor: прохід малий (~10 картинок на згортку = 1–2 кроки), тому `folds.min_steps_per_step: 20` проганяє
@@ -81,9 +82,10 @@ training-data/eye-nerve-definitor/training-masks/015МЛФ01.mask.jpg     (бу�
 * Поріг рахується на **відкладених пацієнтах** (`gate.source: test`; для definitor це 20% пацієнтів).
   Причина: при ротації згорток «наступну згортку» мережа вже бачила в попередніх проходах.
   Колонка `overfit_gap` = recall на згортках − recall на тесті; якщо вона росте, мережа запам'ятовує.
-* Менша ємність:
-  * definitor стартує з `base: 32` (3.2M параметрів замість 12.7M); енкодер бере найсильніші фільтри VGG16;
-  * classifier має `head: gap` (global average pooling замість 2M-вагового flatten → fc).
+* Обидві мережі стартують повного розміру: definitor `base: 64` (12.7M), classifier з оригінальним `head: flatten`.
+  Зменшує їх сам SurgicalSlicing. Якщо перенавчання сильне, є дві опції:
+  * `model.base: 32` для definitor (енкодер бере найсильніші фільтри VGG16);
+  * `model.head: gap` для classifier (~2M параметрів менше).
 * Регуляризація: weight decay 1e-4, dropout 0.04 уже під час навчання.
 * Аугментація definitor: зсув ±8%, масштаб ±10%, поворот, gamma, легке розмиття.
 * Захист replay від хибних міток. Семпл, який лишається неправильним, поки решта його згортки вже вивчена, 8 разів
@@ -96,8 +98,13 @@ python code_new/train_surgical.py --config code_new/configs/definitor_gpu.yaml
 python code_new/train_surgical.py --config code_new/configs/definitor_gpu.yaml --resume       # продовжити
 python code_new/train_surgical.py --config code_new/configs/classifier_gpu.yaml --set run.name=v2 --set surgical.cut_ratio=0.1
 ```
-На ноуті ті самі команди з `*_laptop.yaml`. Будь-яке значення конфігу можна перекрити через `--set ключ=значення`.
+На домашньому ПК ті самі команди з `*_laptop.yaml`: definitor 512 px по 4 картинки; GPU береться, якщо torch його бачить. Будь-яке значення конфігу можна перекрити через `--set ключ=значення`.
 Ctrl+C зберігає стан; продовження з `--resume`.
+
+**Збої.** `state_last.pth` пишеться після кожного кроку безпечно: спершу в тимчасовий файл, потім підміна. Крім того,
+кожні `logging.backup_every_passes` (3) проходи робиться копія в `backups/`; зберігаються 5 найновіших.
+Якщо після жорсткого збою `state_last.pth` пошкоджений, `--resume` сам бере найновішу цілу копію.
+Конкретну копію можна задати: `--resume --resume-from training-runs/<run>/backups/state_pass_0012.pth`.
 
 Результати лежать у `training-runs/<run.name>/`. Папка сама себе ігнорує в git.
 

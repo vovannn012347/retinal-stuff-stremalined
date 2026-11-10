@@ -1,19 +1,20 @@
-# Definitor on a standard laptop, CPU only. Smaller input: full 576 px is very slow on a CPU.
+# Definitor on the home PC / laptop: 4 images of 512x512 fit if nothing else runs.
+# Uses the GPU if torch sees one, otherwise the CPU (slow at this size).
 extends: definitor_base.yaml
 
 run:
   name: definitor_laptop
 
 device:
-  use_cuda_if_available: false
+  use_cuda_if_available: true
 
 preprocess:
-  size: 288
+  size: 512                 # divisible by 16
 
 gate:
-  boundary_tolerance_px: 1              # half resolution
+  boundary_tolerance_px: 2
 
 training:
-  batch_size: 1
+  batch_size: 4             # halved automatically on out-of-memory (GPU)
   effective_batch_size: 8
   num_workers: 0

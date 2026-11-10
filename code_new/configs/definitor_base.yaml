@@ -33,8 +33,9 @@ augmentation:                           # geometric ones applied to image and ma
 
 model:
   init: vgg16                           # vgg16 (encoder; base < 64 takes the strongest VGG filters) | checkpoint | scratch
-  base: 32                              # ~60 annotated images: half width (3.2M params instead of 12.7M)
-                                        # old FcnskipNerveDefinitor2 checkpoints load with init: checkpoint
+  base: 64                              # full model (12.7M params); SurgicalSlicing makes it smaller.
+                                        # base: 32 = half width. Old FcnskipNerveDefinitor2 checkpoints load
+                                        # with init: checkpoint
 
 training:
   batch_size: 2                         # images per forward pass (memory)

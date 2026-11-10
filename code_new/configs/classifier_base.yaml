@@ -35,8 +35,8 @@ model:
   init: vgg16                           # vgg16 | checkpoint | scratch (old 16_01_2026 *.pth also loads)
   base: 64
   hidden: 64
-  head: gap                             # gap: global average pooling -> fc (512x64 weights)
-                                        # flatten: old layout (32768x64 weights in fc.0)
+  head: flatten                         # flatten: full original layout (32768x64 weights in fc.0)
+                                        # gap: global average pooling -> fc (512x64 weights, ~2M fewer params)
 
 training:
   batch_size: 16

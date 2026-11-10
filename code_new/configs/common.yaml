@@ -60,8 +60,9 @@ training:
   betas: [0.9, 0.999]
   grad_clip: 5.0                        # 0 = off
   warmup_steps: 50                      # linear lr warm-up after every new optimizer (start, cut, retry)
-  # reduce-on-plateau during the learn phase (gate-source loss, i.e. the held-out patients)
-  plateau_passes: 12                    # the test loss is noisy (few patients): be patient
+  # reduce-on-plateau during the learn phase. Signal: next-fold test loss of the pass (every sample
+  # once), smoothed over passes - the few held-out patients are too noisy for this
+  plateau_passes: 12
   plateau_factor: 0.5
   plateau_min_delta: 0.01               # relative improvement that counts
   plateau_max_reductions: 3             # per learn phase (lr never drops below 1/8 of where the phase started)
@@ -111,4 +112,6 @@ surgical:
 
 logging:
   print_every_steps: 1
-  save_state_every_step: true           # state_last.pth after every fold step (resume point)
+  save_state_every_step: true           # state_last.pth after every fold step (resume point; written safely)
+  backup_every_passes: 3                # + a copy in backups/ every N passes, in case the PC crashes hard
+  backup_keep: 5                        # newest N backups are kept
