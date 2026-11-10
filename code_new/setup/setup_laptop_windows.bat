@@ -1,23 +1,25 @@
 @echo off
 rem SurgicalSlicing - laptop setup (Windows, CPU).
-rem Uses the existing venv in the repository root (retinal-stuff-streamlined\venv);
-rem creates it with Python 3.11 only if it does not exist.
+rem Uses the existing venv in the repository root (.venv, or venv);
+rem creates .venv with Python 3.11 only if neither exists.
 rem Usage:  code_new\setup\setup_laptop_windows.bat
 
 setlocal
 set "REPO=%~dp0..\.."
 pushd "%REPO%"
 
-if not exist "venv\Scripts\python.exe" (
-    echo [setup] venv not found - creating it with Python 3.11
-    py -3.11 -m venv venv 2>nul || python -m venv venv
+set "VENV=.venv"
+if not exist ".venv\Scripts\python.exe" if exist "venv\Scripts\python.exe" set "VENV=venv"
+if not exist "%VENV%\Scripts\python.exe" (
+    echo [setup] no venv found - creating .venv with Python 3.11
+    py -3.11 -m venv .venv 2>nul || python -m venv .venv
     if errorlevel 1 (
-        echo [setup] could not create venv. Install Python 3.10-3.13 from python.org and retry.
+        echo [setup] could not create the venv. Install Python 3.10-3.13 from python.org and retry.
         popd & exit /b 1
     )
 )
 
-set "PY=venv\Scripts\python.exe"
+set "PY=%VENV%\Scripts\python.exe"
 "%PY%" -m pip install --upgrade pip
 if errorlevel 1 goto :fail
 
@@ -31,7 +33,8 @@ if errorlevel 1 goto :fail
 "%PY%" code_new\setup\check_env.py
 echo.
 echo [setup] done. Train with:
-echo     venv\Scripts\python.exe code_new\train_surgical.py --config code_new\configs\laptop.yaml
+echo     %PY% code_new\train_surgical.py --config code_new\configs\definitor_laptop.yaml
+echo     %PY% code_new\train_surgical.py --config code_new\configs\classifier_laptop.yaml
 popd
 exit /b 0
 

@@ -1,0 +1,9 @@
+# Definitor on Ubuntu + CUDA GPU.
+extends: definitor_base.yaml
+
+run:
+  name: definitor_gpu
+
+training:
+  batch_size: 8             # lower to 4 if the GPU has < 8 GB
+  num_workers: 4

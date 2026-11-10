@@ -1,0 +1,9 @@
+# Classifier on Ubuntu + CUDA GPU.
+extends: classifier_base.yaml
+
+run:
+  name: classifier_gpu
+
+training:
+  batch_size: 32
+  num_workers: 4

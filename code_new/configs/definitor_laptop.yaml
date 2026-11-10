@@ -1,0 +1,15 @@
+# Definitor on a standard laptop, CPU only. Smaller input: full 576 px is very slow on a CPU.
+extends: definitor_base.yaml
+
+run:
+  name: definitor_laptop
+
+device:
+  use_cuda_if_available: false
+
+preprocess:
+  size: 288
+
+training:
+  batch_size: 2
+  num_workers: 0

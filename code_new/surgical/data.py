@@ -1,119 +1,75 @@
-"""Datasets, patient-grouped folds and the fold rotation schedule.
+"""Task-independent data plumbing: patient grouping, folds, fold rotation, mistake replay sampler.
 
 Fold rotation (the training method):
-  * a dataset is split into K folds by patient (stratified by label combination);
+  * a dataset is split into K folds by patient (stratified by a per-sample signature);
   * one fold step = train on fold order[j], then test on fold order[j+1];
   * a pass = all K folds trained once; then the fold order is shuffled;
   * after `passes_per_dataset` passes the next dataset in the list is used.
 """
-import csv
 import hashlib
 import json
 import random
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import numpy as np
 import torch
-from PIL import Image
-from torch.utils.data import Dataset, Sampler
-import torchvision.transforms as T
+from torch.utils.data import Sampler
 
 IMG_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp', '.ppm', '.pgm', '.jfif')
 
 
 @dataclass
 class Sample:
-    path: str
-    labels: np.ndarray          # float32, label order from the config
+    path: str                   # image path (also the key for caches and the mistake record)
     group: str                  # patient key
+    sig: tuple = ()             # stratification signature (e.g. binarised labels)
+    labels: Optional[np.ndarray] = None   # classifier
+    mask: Optional[str] = None            # definitor: mask path
+    extra: dict = field(default_factory=dict)
 
 
 # ── Patient grouping ──────────────────────────────────────────────────────────────────
-_TRAILING_INDEX = re.compile(r'(_\d+)+$')
-_EYE_SUFFIX = re.compile(r'_(left|right)$', re.IGNORECASE)
-_LOCAL_EYE = re.compile(r'^(\d+\D+?)\d{2}$')      # 028ІГБ02 -> 028ІГБ
+_ODIR = re.compile(r'^(\d+)_(left|right)(_\d+)*$', re.IGNORECASE)        # 1138_left_0 -> 1138
+_LOCAL = re.compile(r'^\d{3}(\D+?)\d{2}(_\d+)*$')                       # 028ІГБ02_1_0 -> ІГБ
 
 
 def group_key(filename: str, regex: Optional[str] = None) -> str:
+    """Patient id from a file name. Local clinic files are numbered per eye (027ІГБ01, 028ІГБ02),
+    so the initials are the patient key. Unknown names: the whole stem (one patient per file)."""
     stem = Path(filename).stem
+    if stem.endswith('.mask'):
+        stem = stem[:-5]
     if regex:
         m = re.search(regex, stem)
         return m.group(1) if m else stem
-    stem = _TRAILING_INDEX.sub('', stem)          # crop / variant indices: _0, _1_0
-    stem = re.sub(r'_cropped$', '', stem)
-    stem = _TRAILING_INDEX.sub('', stem)
-    stem = _EYE_SUFFIX.sub('', stem)              # ODIR: 1138_left -> 1138
-    m = _LOCAL_EYE.match(stem)                    # local clinic: 028ІГБ02 -> 028ІГБ
+    stem = re.sub(r'_cropped(_\d+)*$', '', stem)
+    m = _ODIR.match(stem)
     if m:
-        stem = m.group(1)
+        return m.group(1)
+    m = _LOCAL.match(stem)
+    if m:
+        return m.group(1)
     return stem
 
 
-# ── Scanning ──────────────────────────────────────────────────────────────────────────
-def read_label_csv(path: Path, order: List[str]) -> Optional[np.ndarray]:
-    with open(path, 'r', encoding='utf-8-sig', newline='') as f:
-        rows = list(csv.DictReader(f))
-    if not rows:
-        return None
-    row = rows[0]
-    out = []
-    for name in order:
-        v = row.get(name, '')
-        try:
-            out.append(float(v) if v not in (None, '') else 0.0)
-        except ValueError:
-            out.append(0.0)
-    return np.asarray(out, dtype=np.float32)
-
-
-def scan_dataset(root: Path, order: List[str], images_sub='images', labels_sub='labels',
-                 group_regex=None, log=print) -> List[Sample]:
-    img_dir, lbl_dir = root / images_sub, root / labels_sub
-    if not img_dir.is_dir():
-        raise FileNotFoundError(f"Dataset images folder not found: {img_dir}")
-    if not lbl_dir.is_dir():
-        raise FileNotFoundError(f"Dataset labels folder not found: {lbl_dir}")
-    samples, missing = [], 0
-    for p in sorted(img_dir.rglob('*')):
-        if not p.is_file() or not p.name.lower().endswith(IMG_EXTENSIONS):
-            continue
-        rel = p.relative_to(img_dir)
-        cands = [lbl_dir / rel.parent / (p.name + '.csv'), lbl_dir / rel.parent / (p.stem + '.csv'),
-                 lbl_dir / (p.name + '.csv')]
-        lbl = next((c for c in cands if c.is_file()), None)
-        if lbl is None:
-            missing += 1
-            continue
-        labels = read_label_csv(lbl, order)
-        if labels is None:
-            missing += 1
-            continue
-        samples.append(Sample(str(p), labels, group_key(p.name, group_regex)))
-    if missing:
-        log(f"  [data] {root.name}: {missing} image(s) without a label file were skipped")
-    if not samples:
-        raise RuntimeError(f"No labelled images in {root}")
-    return samples
+def list_images(folder: Path) -> List[Path]:
+    return [p for p in sorted(folder.rglob('*')) if p.is_file() and p.name.lower().endswith(IMG_EXTENSIONS)]
 
 
 # ── Folds ─────────────────────────────────────────────────────────────────────────────
-def _signature(labels: np.ndarray, thr: float):
-    return tuple(int(v >= thr) for v in labels)
-
-
-def split_groups(samples: List[Sample], k: int, test_fraction: float, thr: float, seed: int):
-    """Stratified (by label combination) patient-grouped split -> (test_idx, [fold_idx...])."""
+def split_groups(samples: List[Sample], k: int, test_fraction: float, seed: int):
+    """Stratified (by signature) patient-grouped split -> (test_idx, [fold_idx...])."""
     rng = random.Random(seed)
     groups: Dict[str, List[int]] = {}
     for i, s in enumerate(samples):
         groups.setdefault(s.group, []).append(i)
-    # group signature = element-wise max of its samples' labels
     buckets: Dict[tuple, List[str]] = {}
     for g, idx in groups.items():
-        sig = _signature(np.max(np.stack([samples[i].labels for i in idx]), axis=0), thr)
+        sigs = [samples[i].sig for i in idx]
+        sig = tuple(max(v) for v in zip(*sigs)) if sigs and sigs[0] else ()
         buckets.setdefault(sig, []).append(g)
 
     test_groups = set()
@@ -121,15 +77,14 @@ def split_groups(samples: List[Sample], k: int, test_fraction: float, thr: float
         for sig in sorted(buckets):
             gs = sorted(buckets[sig])
             rng.shuffle(gs)
-            n_test = int(round(len(gs) * test_fraction))
-            test_groups.update(gs[:n_test])
+            test_groups.update(gs[:int(round(len(gs) * test_fraction))])
 
     fold_groups = [[] for _ in range(k)]
     fold_sizes = [0] * k
     for sig in sorted(buckets):
         gs = sorted(g for g in buckets[sig] if g not in test_groups)
         rng.shuffle(gs)
-        gs.sort(key=lambda g: -len(groups[g]))            # big patients first, then fill
+        gs.sort(key=lambda g: -len(groups[g]))
         per_fold_sig = [0] * k
         for g in gs:
             j = min(range(k), key=lambda f: (per_fold_sig[f], fold_sizes[f]))
@@ -149,99 +104,114 @@ def dataset_fingerprint(samples: List[Sample]) -> str:
     return h.hexdigest()[:16]
 
 
-def load_or_make_split(samples, k, test_fraction, thr, seed, split_file: Path, log=print):
+def load_or_make_split(samples, k, test_fraction, seed, split_file: Path, log=print):
     names = [Path(s.path).name for s in samples]
     fp = dataset_fingerprint(samples)
     if split_file.is_file():
         data = json.loads(split_file.read_text(encoding='utf-8'))
         if data.get('fingerprint') == fp and data.get('k') == k:
             pos = {n: i for i, n in enumerate(names)}
-            test_idx = [pos[n] for n in data['test']]
-            folds = [[pos[n] for n in f] for f in data['folds']]
-            return test_idx, folds
+            return [pos[n] for n in data['test']], [[pos[n] for n in f] for f in data['folds']]
         log(f"  [data] dataset changed since {split_file.name} was written -> new split")
-    test_idx, folds = split_groups(samples, k, test_fraction, thr, seed)
+    test_idx, folds = split_groups(samples, k, test_fraction, seed)
+    if any(len(f) == 0 for f in folds):
+        raise RuntimeError(f"{len({s.group for s in samples})} patients are not enough for {k} folds "
+                           f"(+ test) - lower folds.k or folds.test_fraction")
     split_file.write_text(json.dumps({
         'fingerprint': fp, 'k': k, 'test_fraction': test_fraction, 'seed': seed,
-        'test': [names[i] for i in test_idx],
-        'folds': [[names[i] for i in f] for f in folds],
+        'test': [names[i] for i in test_idx], 'folds': [[names[i] for i in f] for f in folds],
     }, ensure_ascii=False, indent=1), encoding='utf-8')
     return test_idx, folds
 
 
-# ── Images ────────────────────────────────────────────────────────────────────────────
-def load_image(path: str, size: int, mode: str = 'stretch', crop_fraction: float = 1.0) -> torch.Tensor:
-    """-> uint8 tensor [3, size, size]."""
-    img = Image.open(path).convert('RGB')
-    w, h = img.size
-    if mode == 'center_crop':
-        side = int(min(w, h) * max(0.05, min(1.0, crop_fraction)))
-        left, top = (w - side) // 2, (h - side) // 2
-        img = img.crop((left, top, left + side, top + side))
-    elif mode == 'pad':
-        side = max(w, h)
-        canvas = Image.new('RGB', (side, side), (0, 0, 0))
-        canvas.paste(img, ((side - w) // 2, (side - h) // 2))
-        img = canvas
-    elif mode != 'stretch':
-        raise ValueError(f"preprocess.mode must be stretch | pad | center_crop, got {mode!r}")
-    img = img.resize((size, size), Image.BILINEAR)
-    return torch.from_numpy(np.asarray(img, dtype=np.uint8).copy()).permute(2, 0, 1).contiguous()
-
-
+# ── Image cache ───────────────────────────────────────────────────────────────────────
 class ImageStore:
-    def __init__(self, size, mode, crop_fraction, cache=True):
-        self.size, self.mode, self.crop_fraction, self.cache = size, mode, crop_fraction, cache
-        self._mem: Dict[str, torch.Tensor] = {}
+    """Caches whatever `load_fn(sample)` returns (decoded, resized tensors), keyed by sample.path."""
 
-    def get(self, path: str) -> torch.Tensor:
-        t = self._mem.get(path)
-        if t is None:
-            t = load_image(path, self.size, self.mode, self.crop_fraction)
+    def __init__(self, load_fn: Callable, cache=True):
+        self.load_fn, self.cache = load_fn, cache
+        self._mem: Dict[str, object] = {}
+
+    def get(self, sample: Sample):
+        v = self._mem.get(sample.path)
+        if v is None:
+            v = self.load_fn(sample)
             if self.cache:
-                self._mem[path] = t
-        return t
+                self._mem[sample.path] = v
+        return v
 
-    def preload(self, paths):
+    def preload(self, samples):
         if self.cache:
-            for p in paths:
-                self.get(p)
-
-
-def build_augment(cfg_aug):
-    ops = []
-    if cfg_aug.get('hflip', 0) > 0:
-        ops.append(T.RandomHorizontalFlip(cfg_aug['hflip']))
-    if cfg_aug.get('vflip', 0) > 0:
-        ops.append(T.RandomVerticalFlip(cfg_aug['vflip']))
-    if cfg_aug.get('rotation_degrees', 0) > 0:
-        ops.append(T.RandomRotation(cfg_aug['rotation_degrees'], interpolation=T.InterpolationMode.BILINEAR))
-    cj = cfg_aug.get('color_jitter')
-    if cj and any(v > 0 for v in cj):
-        ops.append(T.ColorJitter(*cj))
-    if cfg_aug.get('randaug_magnitude', 0) > 0:
-        ops.append(T.RandAugment(num_ops=2, magnitude=int(cfg_aug['randaug_magnitude']), num_magnitude_bins=31))
-    return T.Compose(ops) if ops else None
+            for s in samples:
+                self.get(s)
 
 
 def to_input(img_u8: torch.Tensor) -> torch.Tensor:
-    """uint8 [3,H,W] -> float normalised to [-1, 1] (same as the old trainer)."""
+    """uint8 [C,H,W] -> float normalised to [-1, 1] (same as the old trainers)."""
     return img_u8.float().div_(127.5).sub_(1.0)
 
 
-class RetinaDataset(Dataset):
-    def __init__(self, samples: List[Sample], store: ImageStore, augment=None):
-        self.samples, self.store, self.augment = samples, store, augment
+# ── Mistake replay ────────────────────────────────────────────────────────────────────
+class MistakeTracker:
+    """Per-sample error history (error on a 0..1 scale, see the task's `sample_error`).
+    Errors come from the "test on the next fold" evaluation (clean image, before the network
+    trains on it in this pass), kept as a moving average. When a fold is trained, every sample whose
+    error is >= min_error AND above the fold median (so early on, when everything is wrong, only the
+    worse half) is repeated:  extra copies = min(max_extra, floor(gain * error / min_error)).
+    With min_error 0.25: error 0.25 -> +1, 0.5 -> +2, >= 0.75 -> +3 (cap)."""
 
-    def __len__(self):
-        return len(self.samples)
+    def __init__(self, cfg):
+        self.enabled = bool(cfg.get('enabled', True))
+        self.ema = float(cfg.get('ema', 0.5))
+        self.gain = float(cfg.get('gain', 1.0))
+        self.max_extra = int(cfg.get('max_extra', 3))
+        self.min_error = float(cfg.get('min_error', 0.25))
+        self.rec: Dict[str, dict] = {}
 
-    def __getitem__(self, i):
-        s = self.samples[i]
-        img = self.store.get(s.path)
-        if self.augment is not None:
-            img = self.augment(img)
-        return to_input(img), torch.from_numpy(s.labels), i
+    def update(self, paths, errors):
+        for p, e in zip(paths, errors):
+            e = float(e)
+            r = self.rec.get(p)
+            if r is None:
+                self.rec[p] = {'err': e, 'last': e, 'seen': 1, 'repeats': 0}
+            else:
+                r['err'] = self.ema * r['err'] + (1 - self.ema) * e
+                r['last'] = e
+                r['seen'] += 1
+
+    def expand(self, indices, samples) -> (List[int], int):
+        """-> (training index list with repeats, number of extra items)."""
+        if not self.enabled:
+            return list(indices), 0
+        known = [self.rec[samples[i].path]['err'] for i in indices if samples[i].path in self.rec]
+        med = float(np.median(known)) if len(known) >= 2 else 0.0
+        out, extra_total = [], 0
+        for i in indices:
+            out.append(i)
+            r = self.rec.get(samples[i].path)
+            if r is None or r['err'] < self.min_error or r['err'] <= med:
+                continue
+            extra = min(self.max_extra, int(self.gain * r['err'] / self.min_error))
+            if extra > 0:
+                out.extend([i] * extra)
+                r['repeats'] += extra
+                extra_total += extra
+        return out, extra_total
+
+    def write_csv(self, path: Path, top: int = 0):
+        rows = sorted(self.rec.items(), key=lambda kv: -kv[1]['err'])
+        if top:
+            rows = rows[:top]
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write('path,error_ema,last_error,times_tested,extra_repeats\n')
+            for p, r in rows:
+                f.write(f'"{p}",{r["err"]:.6g},{r["last"]:.6g},{r["seen"]},{r["repeats"]}\n')
+
+    def state_dict(self):
+        return {'rec': self.rec}
+
+    def load_state_dict(self, d):
+        self.rec = d.get('rec', {})
 
 
 class SettableSampler(Sampler):

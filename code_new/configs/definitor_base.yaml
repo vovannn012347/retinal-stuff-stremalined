@@ -1,0 +1,51 @@
+# Step 1: optic nerve disc definitor (segmentation: fundus image -> disc mask).
+extends: common.yaml
+task: definitor
+
+run:
+  name: definitor_v1
+
+# Each dataset = an image folder + a mask folder. Masks are matched by name:
+#   images/015МЛФ01.jpg  <->  masks/015МЛФ01.mask.jpg   (any image extension on both sides)
+datasets:
+  - name: local_definitor_v1
+    images: training-data/source-input/input_for_definitor
+    masks: training-data/eye-nerve-definitor/training-masks
+
+group_regex: null                       # patient key override (regex with one group)
+
+preprocess:
+  size: 576                             # input is size x size, must be divisible by 16 (old trainer: 576)
+  crop_to_retina: true                  # crop the black border away first (same box for the mask)
+  black_level: 10                       # grey level that still counts as border
+  grayscale: true                       # the old trainer fed grey images (RandomGreyscale p=1)
+  cache_images: true
+
+augmentation:                           # applied to image and mask together
+  hflip: 0.5
+  vflip: 0.5
+  rotation_degrees: 10
+  brightness_contrast: [0.15, 0.15]     # image only
+
+model:
+  init: vgg16                           # vgg16 (encoder) | checkpoint | scratch
+  base: 64                              # old FcnskipNerveDefinitor2 checkpoints load with init: checkpoint
+
+training:
+  batch_size: 4
+  num_workers: 2
+  lr: 5.0e-5
+
+# Recall matters more than precision: a missed piece of the disc is worse than a few extra pixels.
+loss:
+  pos_weight: 3.0                       # BCE weight of disc pixels
+  tversky_weight: 1.0                   # + Tversky loss; beta > alpha punishes missed disc pixels more
+  tversky_alpha: 0.3                    # weight of false positives
+  tversky_beta: 0.7                     # weight of false negatives
+
+# Pixel metrics pooled over the pass:
+#   recall    = correctly found disc pixels / all disc pixels       TP / (TP + FN)
+#   precision = correctly found disc pixels / all predicted pixels  TP / (TP + FP)
+gate:
+  recall: 0.95
+  precision: 0.70

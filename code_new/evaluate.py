@@ -1,69 +1,84 @@
-"""Evaluate a trained model, or predict single images.
+"""Evaluate a trained model on a dataset, or run it on images.
 
-    # metrics on a dataset folder (images/ + labels/), or only on the held-out test patients of a run
-    python code_new/evaluate.py --model training-runs/surgical_gpu/final_model.pth --dataset training-data/classifier/datasets/odir_local_v1
-    python code_new/evaluate.py --model training-runs/surgical_gpu/final_model.pth --dataset ... --split training-runs/surgical_gpu/split_odir_local_v1.json
+    # metrics on the config's first dataset (or only the held-out test patients of a run)
+    python code_new/evaluate.py --config code_new/configs/definitor_gpu.yaml --model training-runs/definitor_gpu/final_model.pth
+    python code_new/evaluate.py --config ... --model ... --split training-runs/definitor_gpu/split_local_definitor_v1.json
 
-    # probabilities for images
-    python code_new/evaluate.py --model final_model.pth --images some_crop.jpg other.jpg
+    # run on images: classifier prints probabilities, definitor writes masks to --out
+    python code_new/evaluate.py --config ... --model ... --images a.jpg b.jpg --out predicted_masks
 """
 import argparse
 import json
 import sys
 from pathlib import Path
 
-import numpy as np
 import torch
+from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from surgical import data as D                                   # noqa: E402
-from surgical.metrics import compute_metrics                     # noqa: E402
-from surgical.model import load_model_file, count_params         # noqa: E402
+from surgical import data as D                                    # noqa: E402
+from surgical.config import load_config                           # noqa: E402
+from surgical.tasks import get_task, load_model_any, _TaskDataset  # noqa: E402
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--config', required=True, help='the training config (task, preprocessing, gate)')
     ap.add_argument('--model', required=True)
-    ap.add_argument('--dataset')
+    ap.add_argument('--dataset', type=int, default=0, help='index in the config datasets list')
     ap.add_argument('--split', help='split_<name>.json of a run: evaluate only its test patients')
     ap.add_argument('--images', nargs='*')
-    ap.add_argument('--threshold', type=float)
-    ap.add_argument('--batch-size', type=int, default=32)
-    args = ap.parse_args()
+    ap.add_argument('--out', default='predictions')
+    ap.add_argument('--batch-size', type=int, default=4)
+    ap.add_argument('--set', action='append', default=[], metavar='KEY=VALUE')
+    a = ap.parse_args()
 
-    ckpt = torch.load(args.model, map_location='cpu', weights_only=False)
-    order = ckpt.get('label_order', ['glaucoma', 'atrophy', 'valid_image'])
-    pp = ckpt.get('preprocess', {'size': 128, 'mode': 'stretch', 'crop_fraction': 1.0})
-    thr = args.threshold if args.threshold is not None else ckpt.get('decision_threshold', 0.5)
-    model = load_model_file(args.model).eval()
+    cfg = load_config(a.config, a.set)
+    task = get_task(cfg)
+    model = load_model_any(a.model).eval()
     dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.to(dev)
-    print(f"model: {count_params(model):,} params, channels {model.channels}, hidden {model.hidden}")
+    print(f"model: {type(model).__name__}, {sum(p.numel() for p in model.parameters()):,} params")
 
-    def run(paths):
-        out = []
-        for i in range(0, len(paths), args.batch_size):
-            x = torch.stack([D.to_input(D.load_image(p, int(pp['size']), pp.get('mode', 'stretch'),
-                                                     float(pp.get('crop_fraction', 1.0))))
-                             for p in paths[i:i + args.batch_size]]).to(dev)
-            out.append(model.predict_proba(x).cpu().numpy())
-        return np.concatenate(out) if out else np.zeros((0, len(order)))
+    if a.images:
+        out = Path(a.out)
+        for p in a.images:
+            s = D.Sample(p, '', (), labels=None, mask=None)
+            if task.name == 'definitor':
+                img = Image.open(p).convert('RGB')
+                tmp = Image.new('L', img.size)                      # dummy mask for the shared loader
+                tmp_path = out / '_tmp_mask.png'
+                out.mkdir(parents=True, exist_ok=True); tmp.save(tmp_path)
+                s.mask = str(tmp_path)
+                x, _ = task.item(task.load(s), s, False)
+                prob = model.predict_proba(x[None].to(dev))[0, 0].cpu()
+                Image.fromarray((prob.numpy() >= float(cfg.gate.decision_threshold)).astype('uint8') * 255).save(
+                    out / (Path(p).stem + '.mask.png'))
+                print(f"{Path(p).name}: disc area {float((prob >= 0.5).float().mean()):.2%} -> {out}")
+                tmp_path.unlink()
+            else:
+                x = D.to_input(task.load(s))
+                pr = model.predict_proba(x[None].to(dev))[0].cpu().tolist()
+                print(Path(p).name, ' '.join(f"{n}={v:.3f}" for n, v in zip(task.order, pr)))
+        return
 
-    if args.images:
-        for p, pr in zip(args.images, run(args.images)):
-            print(Path(p).name, ' '.join(f"{n}={v:.3f}" for n, v in zip(order, pr)))
-
-    if args.dataset:
-        samples = D.scan_dataset(Path(args.dataset), order)
-        if args.split:
-            names = set(json.loads(Path(args.split).read_text(encoding='utf-8'))['test'])
-            samples = [s for s in samples if Path(s.path).name in names]
-        probs = run([s.path for s in samples])
-        m = compute_metrics(probs, np.stack([s.labels for s in samples]), order, 0.5, thr)
-        print(f"{m['n']} images, exact match {m['exact_match']:.3f}")
-        for n in order:
-            print(f"  {n:12s} acc {m[f'{n}_acc']:.3f}  recall {m[f'{n}_recall']:.3f}  "
-                  f"precision {m[f'{n}_precision']:.3f}  positives {m[f'{n}_pos']}")
+    samples = task.scan(cfg.datasets[a.dataset])
+    if a.split:
+        names = set(json.loads(Path(a.split).read_text(encoding='utf-8'))['test'])
+        samples = [s for s in samples if Path(s.path).name in names]
+    store = D.ImageStore(task.load, cache=False)
+    loader = torch.utils.data.DataLoader(_TaskDataset(samples, store, task.item, False), batch_size=a.batch_size)
+    acc = task.new_accumulator()
+    with torch.no_grad():
+        for x, y, _ in loader:
+            acc.add(model(x.to(dev)), y.to(dev))
+    m = acc.result()
+    print(f"{len(samples)} samples: {task.short(m)}")
+    for k, v in m.items():
+        if k not in ('gate_main', 'gate_recall'):
+            print(f"  {k:24s} {v:.4f}" if isinstance(v, float) else f"  {k:24s} {v}")
+    passed, _ = task.gate(m)
+    print(f"gate ({'passed' if passed else 'not passed'})")
 
 
 if __name__ == '__main__':

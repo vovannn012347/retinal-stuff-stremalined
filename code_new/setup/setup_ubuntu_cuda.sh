@@ -80,4 +80,5 @@ fi
 
 say "done. Activate and train:"
 echo "    source \"$VENV/bin/activate\""
-echo "    python code_new/train_surgical.py --config code_new/configs/gpu.yaml"
+echo "    python code_new/train_surgical.py --config code_new/configs/definitor_gpu.yaml"
+echo "    python code_new/train_surgical.py --config code_new/configs/classifier_gpu.yaml"

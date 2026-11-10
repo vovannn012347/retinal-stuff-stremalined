@@ -1,0 +1,93 @@
+# SurgicalSlicing – settings shared by both steps (definitor, classifier).
+# Task configs extend this file; hardware profiles (laptop / gpu) extend the task configs.
+# Any value can be overridden from the command line:  --set training.lr=5e-5 --set folds.k=6
+# Relative paths are resolved against the repository root (the folder that contains code_new/).
+
+run:
+  output_root: training-runs             # gets its own .gitignore ("*"), nothing from here is committed
+  seed: 1234
+
+device:
+  use_cuda_if_available: true
+  amp: auto                              # auto = float16 autocast on CUDA, off on CPU
+  cpu_threads: 0                         # 0 = all cores
+
+# ── Folds ─────────────────────────────────────────────────────────────────────────────
+# One fold step = train on fold order[j], then test on the NEXT fold order[j+1]
+# (the one the network has not been trained on in this pass yet).
+# A pass = every fold trained once. After each pass the fold order is shuffled.
+# Dropout / penalty schedules and the gate work per pass (the "epoch" of this method).
+folds:
+  k: 5
+  repeats_per_step: 1                   # sweeps over the training fold in one step
+  passes_per_dataset: 3                 # switch to the next dataset after this many passes
+  test_fraction: 0.10                   # patients held out completely (never trained on); 0 = off
+
+# ── Mistake replay ────────────────────────────────────────────────────────────────────
+# Every sample's error (0..1) is measured when its fold is the "next fold" test (clean image,
+# before the network trains on it in this pass) and kept as a moving average:
+#   definitor:  1 - Tversky score of the thresholded mask (a missed disc pixel weighs more than an
+#               extra one; measured on the scale of a disc, so an empty-mask image is not "always wrong")
+#   classifier: the worst label's |probability - target|  (>= 0.5 means that label is wrong)
+# When a fold is trained, samples with error >= min_error that are also worse than the fold median
+# (early on, when everything is wrong, only the worse half) are repeated:
+#   extra copies = min(max_extra, floor(gain * error / min_error))
+#   min_error 0.25: error 0.25 -> +1 copy, 0.5 -> +2, >= 0.75 -> +3
+# The list (worst first) is written to mistakes.csv after every pass.
+replay:
+  enabled: true
+  ema: 0.5                              # weight of the old error in the moving average
+  min_error: 0.25
+  gain: 1.0
+  max_extra: 3
+
+model:
+  checkpoint: null                      # for init: checkpoint
+
+training:
+  lr_cycle_decay: 0.8                   # lr *= this after every cut
+  lr_min: 1.0e-6
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  grad_clip: 5.0                        # 0 = off
+
+gate:
+  source: folds                         # folds | test  (test = the held-out patients)
+  decision_threshold: 0.5
+  degrade_tolerance: 0.02               # during the ramp: below gate - tolerance => hold the ramp
+
+# ── SurgicalSlicing schedule ──────────────────────────────────────────────────────────
+surgical:
+  # learn phase
+  learn_dropout: 0.0
+  min_learn_passes: 3
+  gate_consecutive_passes: 2            # gate must hold this many passes in a row
+  max_learn_passes: 200                 # first cycle; raise it if the gate is reached late
+  max_recover_passes: 120               # after a cut
+  # dropout ramp on the layers in dropout_layers (null = every block-end dropout of the model)
+  dropout_step: 0.02                    # per pass
+  dropout_max: 0.5
+  dropout_layers: null
+  max_hold_passes: 10                   # ramp may pause this many passes per cycle if metrics drop
+  # penalty on the channels that will be cut
+  penalty_start_dropout: 0.2            # select channels + start penalising when dropout reaches this
+  penalty_base: 0.5                     # "standard" penalty
+  penalty_step: 0.066                   # +6.6 % of penalty_base per pass  (0.033 / pass)
+  penalty_mode: shrink                  # shrink: once per pass  w_sel *= (1 - lambda)
+                                        # l2:     loss += lambda * l2_scale * mean(w_sel^2) every step
+  l2_scale: 1.0
+  hold_passes_at_max: 0                 # extra passes at dropout_max / full penalty before cutting
+  # what is cut
+  cut_ratio: 0.125                      # fraction of channels per layer cut in one cycle
+  importance: l1                        # l1 (filter weights) | l1_inout (filter * next-layer usage)
+  min_channels: 8
+  # stop / retry
+  max_cycles: 8
+  target_param_ratio: 0.15              # stop when params <= this fraction of the start model
+  retry_ratio_factor: 0.5               # recovery failed -> back to the last accepted model, cut less
+  max_retries: 2
+  min_cut_ratio: 0.03
+
+logging:
+  print_every_steps: 1
+  save_state_every_step: true           # state_last.pth after every fold step (resume point)

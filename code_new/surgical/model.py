@@ -58,6 +58,29 @@ class GlaucomaNet(nn.Module):
         return {'channels': list(self.channels), 'hidden': self.hidden, 'num_classes': self.num_classes,
                 'input_size': self.input_size, 'in_channels': self.in_channels}
 
+    # ── graph for surgery (see surgery.py) ──────────────────────────────────────────────
+    def graph(self):
+        convs = self.conv_names()
+        nodes, prev = [], 'input'
+        for n in convs:
+            nodes.append({'name': n, 'inputs': [prev], 'cut': True})
+            prev = n
+        nodes.append({'name': 'fc.0', 'inputs': [prev], 'spatial': self.spatial, 'cut': True})
+        nodes.append({'name': 'fc.3', 'inputs': ['fc.0'], 'cut': False})
+        return nodes
+
+    def widths(self):
+        w = dict(zip(self.conv_names(), self.channels))
+        w['fc.0'] = self.hidden
+        w['fc.3'] = self.num_classes
+        return w
+
+    def with_widths(self, widths):
+        arch = self.arch()
+        arch['channels'] = [widths[n] for n in self.conv_names()]
+        arch['hidden'] = widths['fc.0']
+        return GlaucomaNet(**arch)
+
     def set_dropout(self, p: float, layer_names: Optional[List[str]] = None):
         mods = dict(self.named_modules())
         targets = layer_names or [n for n, m in mods.items() if isinstance(m, (nn.Dropout, nn.Dropout2d))]

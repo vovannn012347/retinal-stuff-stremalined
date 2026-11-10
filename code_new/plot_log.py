@@ -28,11 +28,10 @@ def main():
         sys.exit('log.csv is empty')
     x = col(rows, 'pass')
     fig, ax = plt.subplots(3, 1, figsize=(11, 9), sharex=True)
-    ax[0].plot(x, col(rows, 'fold_acc'), label='accuracy (next fold)')
-    ax[0].plot(x, col(rows, 'fold_recall'), label='recall (next fold)')
-    ax[0].plot(x, col(rows, 'test_acc'), '--', label='accuracy (test patients)')
-    ax[0].plot(x, col(rows, 'test_recall'), '--', label='recall (test patients)')
-    ax[0].axhline(0.90, color='grey', lw=0.6); ax[0].axhline(0.95, color='grey', lw=0.6)
+    for k in ('acc', 'recall', 'precision', 'iou'):
+        if f'fold_{k}' in rows[0]:
+            ax[0].plot(x, col(rows, f'fold_{k}'), label=f'{k} (next fold)')
+            ax[0].plot(x, col(rows, f'test_{k}'), '--', label=f'{k} (test patients)')
     ax[0].set_ylim(0, 1.02); ax[0].legend(loc='lower right', fontsize=8); ax[0].set_ylabel('metric')
     ax[1].plot(x, col(rows, 'dropout'), label='dropout')
     ax[1].plot(x, col(rows, 'penalty'), label='penalty λ')

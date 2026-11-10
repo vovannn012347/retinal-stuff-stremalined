@@ -1,0 +1,52 @@
+# Step 2: glaucoma classifier on optic-disc crops (multi-label: glaucoma, atrophy, valid_image).
+extends: common.yaml
+task: classifier
+
+run:
+  name: classifier_v1
+
+# Each dataset = a folder with images/ and labels/ (labels/<image file name>.csv,
+# header glaucoma,atrophy,valid_image). The list is cycled every folds.passes_per_dataset passes.
+datasets:
+  - name: odir_local_v1
+    path: training-data/classifier/datasets/odir_local_v1
+  # - name: legacy_v0
+  #   path: training-data/classifier/datasets/legacy_v0
+
+labels:
+  order: [glaucoma, atrophy, valid_image]
+  positive_threshold: 0.5               # target >= this counts as positive (0.5 = "suspected")
+  group_regex: null                     # patient key override (regex with one group)
+
+preprocess:
+  size: 128
+  mode: stretch                         # stretch | pad (letterbox) | center_crop
+  crop_fraction: 1.0                    # center_crop only
+  cache_images: true
+
+augmentation:
+  hflip: 0.5
+  vflip: 0.5
+  rotation_degrees: 10
+  color_jitter: [0.15, 0.15, 0.10, 0.05] # brightness, contrast, saturation, hue
+  randaug_magnitude: 9                  # 0 = off
+
+model:
+  init: vgg16                           # vgg16 | checkpoint | scratch (old 16_01_2026 *.pth also loads)
+  base: 64
+  hidden: 64
+
+training:
+  batch_size: 16
+  num_workers: 2
+  lr: 1.0e-4
+  pos_weight: [2.0, 2.0, 1.0]           # BCE weight of positives per label (pushes recall up)
+
+gate:
+  accuracy: 0.90                        # mean per-label accuracy over accuracy_labels
+  recall: 0.95                          # recall must be > this, min over recall_labels
+  accuracy_labels: [glaucoma, atrophy, valid_image]
+  recall_labels: [glaucoma, atrophy]
+
+surgical:
+  cut_fc_hidden: true
