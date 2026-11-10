@@ -115,3 +115,8 @@ logging:
   save_state_every_step: true           # state_last.pth after every fold step (resume point; written safely)
   backup_every_passes: 3                # + a copy in backups/ every N passes, in case the PC crashes hard
   backup_keep: 5                        # newest N backups are kept
+  # definitor: picture of the predicted masks in <run>/samples/ (pass_NNNN.png, accepted_cycle_XX.png):
+  # sample_count fixed held-out images (the same every time) + sample_worst current worst mistakes
+  sample_every_passes: 1                # 0 = off
+  sample_count: 8
+  sample_worst: 4

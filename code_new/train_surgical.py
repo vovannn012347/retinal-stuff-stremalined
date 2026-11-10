@@ -17,6 +17,8 @@ Outputs (training-runs/<run.name>/):
                             --resume falls back to them automatically if state_last.pth is damaged
     log.csv / steps.csv     one row per pass / per fold step
     mistakes.csv            samples ordered by error (what mistake replay repeats)
+    samples/pass_NNNN.png   definitor: predicted masks on fixed held-out images + the current worst
+                            mistakes (every logging.sample_every_passes passes); accepted_cycle_XX.png
     events.log              everything printed
     split_<dataset>.json    patient folds + held-out test patients
 """
@@ -376,6 +378,28 @@ def main():
         for old in sorted(bdir.glob('state_pass_*.pth'))[:-max(1, int(cfg.logging.get('backup_keep', 5)))]:
             old.unlink()
 
+    def sample_indices(b):
+        """fixed images (same every time, so the progress is comparable) + current worst mistakes"""
+        n_fixed, n_worst = int(cfg.logging.get('sample_count', 8)), int(cfg.logging.get('sample_worst', 4))
+        pool = b.test_idx or [i for f in b.folds for i in f]
+        pool = sorted(pool, key=lambda i: Path(b.samples[i].path).name)
+        step_ = max(1, len(pool) // max(1, n_fixed))
+        fixed = pool[::step_][:n_fixed]
+        pos = {s.path: i for i, s in enumerate(b.samples)}
+        worst = [pos[p] for p, r in sorted(tracker.rec.items(), key=lambda kv: -kv[1]['err'])
+                 if p in pos and pos[p] not in fixed][:n_worst]
+        return fixed + worst
+
+    def write_samples(b, name, title):
+        every = int(cfg.logging.get('sample_every_passes', 1))
+        if every <= 0:
+            return
+        try:
+            task.render_samples(model, b.samples, b.store, sample_indices(b), device,
+                                run_dir / 'samples' / f"{name}.png", title)
+        except Exception as e:                                    # never stop training for a picture
+            log(f"[samples] could not write {name}.png: {type(e).__name__}: {e}")
+
     done, reason = False, ''
     fold_acc = task.new_accumulator()
     t_pass = time.time()
@@ -476,6 +500,11 @@ def main():
                              sel_norm_ratio=sel_ratio, action=action,
                              **{f'fold_{k}': fm.get(k) for k in mf}, **{f'test_{k}': tm.get(k) for k in mf})
                 tracker.write_csv(run_dir / 'mistakes.csv')
+                every = int(cfg.logging.get('sample_every_passes', 1))
+                if every > 0 and rotation.total_passes % every == 0:
+                    write_samples(b, f"pass_{rotation.total_passes:04d}",
+                                  f"pass {rotation.total_passes}, cycle {cycle_before} {phase_before}, "
+                                  f"dropout {pass_info['dropout']:.2f}, params {params:,}")
                 log(f"== pass {rotation.total_passes} ({time.time() - t_pass:.0f}s) cycle {cycle_before} "
                     f"{phase_before}{' [hold]' if pass_info['holding'] else ''} | folds {task.short(fm)}"
                     + (f" | test {task.short(tm)}" if tm else '')
@@ -491,6 +520,8 @@ def main():
                         'cycle': schedule.cycle, 'params': params, 'orig_params': orig_params,
                         'metrics': {'fold': fm, 'test': tm}}), path)
                     last_accepted, accepted_lr = str(path), lr
+                    write_samples(b, f"accepted_cycle_{schedule.cycle:02d}",
+                                  f"ACCEPTED cycle {schedule.cycle}, pass {rotation.total_passes}, params {params:,}")
                     schedule.after_accept()
                     log(f"[cycle {schedule.cycle}] ACCEPTED -> {path.name} ({params:,} params, "
                         f"{params / orig_params:.1%} of start)")
