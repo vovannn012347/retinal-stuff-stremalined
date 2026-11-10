@@ -260,10 +260,10 @@ def test_disc_crop():
     yy, xx = np.mgrid[0:H, 0:W]
     rgb = np.zeros((H, W, 3), np.uint8)
     rgb[(yy - 200) ** 2 + (xx - 200) ** 2 < 195 ** 2] = [180, 80, 40]
-    for cx, want in ((200, 1.0), (40, None)):              # centred disc, disc cut by the photo edge
+    for cx, want in ((200, 1.0), (10, None)):              # centred disc, disc cut by the photo edge
         mask = (((yy - 200) ** 2 + (xx - cx) ** 2) < 60 ** 2).astype(np.uint8) * 255
         img = rgb.copy()
-        if cx == 40:
+        if cx == 10:
             img[:, :] = [180, 80, 40]                        # retina reaches the photo edge
         info = C.analyse(img, mask)
         c, _ = C.crop(img, info)
@@ -272,8 +272,8 @@ def test_disc_crop():
         if want:
             assert info.status == 'ok' and info.completeness == 1.0
         else:
-            # visible part of a circle of r 60 whose centre is 40 px from the edge: ~75 %
-            assert info.status == 'partial' and 0.65 < info.completeness < 0.85, info
+            # circle r 60 with its centre 10 px from the photo edge: 60.6 % of it is visible
+            assert info.status == 'partial' and abs(info.completeness - 0.606) < 0.04, info
     assert C.analyse(rgb, np.zeros((H, W), np.uint8)).status == 'no_disc'
     print("disc crop: centred ok, cut disc -> partial, no mask -> no_disc")
 
