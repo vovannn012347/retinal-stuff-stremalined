@@ -10,7 +10,8 @@ nearest-neighbour, so they stay pixel-aligned with their images. Images without 
 processed too (useful later for inference checks); masks without an image are skipped.
 prepare.json records the parameters - the inference script must use the same ones.
 
-Source files are never changed. Existing outputs are overwritten.
+Source files are never changed. The output folder is rebuilt from scratch on every run
+(so masks you removed from the source disappear from the prepared set too).
 """
 import argparse
 import json
@@ -51,6 +52,12 @@ def main():
                 masks[p.stem[:-5]] = p
     (out / 'images').mkdir(parents=True, exist_ok=True)
     (out / 'masks').mkdir(parents=True, exist_ok=True)
+    # start clean: a mask removed from the source must not survive in the prepared set
+    stale = list((out / 'images').glob('*.png')) + list((out / 'masks').glob('*.mask.png'))
+    for f in stale:
+        f.unlink()
+    if stale:
+        print(f"removed {len(stale)} files of the previous preparation")
     params = {'hsv_s': not a.no_hsv_s, 'clahe': not a.no_clahe, 'clip_limit': a.clip_limit, 'tile': a.tile,
               'black_level': a.black_level, 'crop_to_retina': not a.no_crop, 'size': a.size}
 
