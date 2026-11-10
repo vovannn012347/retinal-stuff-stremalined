@@ -112,7 +112,8 @@ python code_new/train_surgical.py --config code_new/configs/definitor_gpu.yaml
 python code_new/train_surgical.py --config code_new/configs/definitor_gpu.yaml --resume       # продовжити
 python code_new/train_surgical.py --config code_new/configs/classifier_gpu.yaml --set run.name=v2 --set surgical.cut_ratio=0.1
 ```
-На домашньому ПК ті самі команди з `*_laptop.yaml`: definitor 512 px по 4 картинки; GPU береться, якщо torch його бачить. Будь-яке значення конфігу можна перекрити через `--set ключ=значення`.
+На домашньому ПК ті самі команди з `*_laptop.yaml`: definitor 512 px по 4 картинки; GPU береться, якщо torch його бачить.
+Без придатного GPU: `definitor_cpu.yaml` (320 px, менше кроків на згортку; приблизно у 5–6 разів швидше на CPU). Будь-яке значення конфігу можна перекрити через `--set ключ=значення`.
 Ctrl+C зберігає стан; продовження з `--resume`.
 
 **Збої.** `state_last.pth` пишеться після кожного кроку безпечно: спершу в тимчасовий файл, потім підміна. Крім того,

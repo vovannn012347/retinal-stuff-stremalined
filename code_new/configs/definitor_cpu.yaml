@@ -1,0 +1,26 @@
+# Definitor on a PC without a usable GPU (CPU only).
+# The full model at 512 px would take ~10+ minutes per pass on a CPU; this profile is ~5-6x faster:
+# smaller input (disc still ~75 px across) and fewer optimizer steps per fold step.
+# The heavy 512 px run belongs on the CUDA machine (definitor_gpu.yaml).
+extends: definitor_base.yaml
+
+run:
+  name: definitor_cpu
+
+device:
+  use_cuda_if_available: false
+  cpu_threads: 0            # all cores - leave the PC alone while it runs
+
+preprocess:
+  size: 320                 # divisible by 16; prepared 512 px images are scaled down on load
+
+gate:
+  boundary_tolerance_px: 1  # ~0.6 of the 512 px scale
+
+training:
+  batch_size: 4
+  effective_batch_size: 8
+  num_workers: 0
+
+folds:
+  min_steps_per_step: 10
