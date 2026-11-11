@@ -68,16 +68,58 @@ def importance(model, name: str, mode: str = "l1") -> torch.Tensor:
     return score
 
 
-def select_units(model, ratio: float, min_channels: int, exclude=(), mode: str = "l1") -> Dict[str, List[int]]:
-    """Per layer: the `ratio` least important outputs (never below min_channels)."""
+INDEX_PATTERNS = ('interleaved', 'first', 'last')
+
+
+def index_pattern(n: int, n_cut: int, pattern: str = 'interleaved') -> List[int]:
+    """Fixed positions to cut, independent of the weights.
+    interleaved: evenly spread, ratio 0.5 -> [1, 3, 5, ...], 0.25 -> [2, 6, 10, ...]
+    first:       the first n_cut channels [0 .. n_cut-1]  (what the old Butcher Slicing code did in practice:
+                 prune.ln_structured(n=0) scores every channel the same, so the first half went)
+    last:        the last n_cut channels"""
+    if pattern == 'interleaved':
+        return sorted({min(n - 1, int((k + 0.5) * n / n_cut)) for k in range(n_cut)})
+    if pattern == 'first':
+        return list(range(n_cut))
+    if pattern == 'last':
+        return list(range(n - n_cut, n))
+    raise ValueError(f"surgical.index_pattern must be one of {INDEX_PATTERNS}, got {pattern!r}")
+
+
+def select_units(model, ratio: float, min_channels: int, exclude=(), mode: str = "index",
+                 pattern: str = "interleaved") -> Dict[str, List[int]]:
+    """Per layer: which outputs to cut (never below min_channels).
+    mode index:          fixed, evenly interleaved positions (ratio 0.5 = every odd channel), as in the
+                         method spec - the weights are not looked at; the penalty empties them before the cut.
+    mode l1 / l1_inout:  the `ratio` outputs with the smallest weights."""
     mods = _mods(model)
     sel = {}
     for name in unit_names(model, exclude):
         n = n_out(mods[name])
         n_cut = min(int(n * ratio), max(0, n - min_channels))
-        if n_cut > 0:
+        if n_cut <= 0:
+            continue
+        if mode == "index":
+            sel[name] = index_pattern(n, n_cut, pattern)
+        else:
             sel[name] = sorted(torch.argsort(importance(model, name, mode))[:n_cut].tolist())
     return sel
+
+
+def slice_record(model, sel: Dict[str, List[int]], channel_map: Dict[str, List[int]]) -> List[dict]:
+    """Registry entries for one cut: what is removed, in the current and in the ORIGINAL numbering.
+    channel_map[layer] = original index of every current output (identity for an uncut layer)."""
+    mods = _mods(model)
+    out = []
+    for name, idx in sel.items():
+        n = n_out(mods[name])
+        orig = channel_map.get(name, list(range(n)))
+        drop = set(idx)
+        out.append({'layer_index': name, 'original_channels': len(orig), 'sliced_channels': len(idx),
+                    'remaining_channels': n - len(idx), 'sliced_indices': list(idx),
+                    'sliced_original_indices': [orig[i] for i in idx],
+                    'kept_original_indices': [orig[i] for i in range(n) if i not in drop]})
+    return out
 
 
 def _rows(m, idx):

@@ -115,12 +115,19 @@ surgical:
   l2_scale: 1.0
   hold_passes_at_max: 0                 # extra passes at dropout_max / full penalty before cutting
   # what is cut
-  cut_ratio: 0.125                      # fraction of channels per layer cut in one cycle
-  importance: l1                        # l1 (filter weights) | l1_inout (filter * next-layer usage)
+  cut_ratio: 0.5                        # fraction of channels per layer cut in one cycle (half, as in Butcher Slicing)
+  importance: index                     # index: fixed interleaved positions (0.5 = every odd channel 1,3,5,...);
+                                        #   the penalty empties them, the rest take over; every cut is written
+                                        #   to slicing_registry.json (current + original indices)
+                                        # l1 | l1_inout: the weakest channels by weight instead
+  index_pattern: interleaved            # with importance: index -  interleaved (1,3,5,... : room between the kept
+                                        #   channels for another network's channels later) | first (first half;
+                                        #   what the old Butcher code effectively cut) | last
   min_channels: 8
   # stop / retry
   max_cycles: 8
-  target_param_ratio: 0.15              # stop when params <= this fraction of the start model
+  target_param_ratio: 0.0               # stop when params <= this fraction of the start model (0 = off:
+                                        #   cut until recovery fails; each half cut leaves ~1/4 of the params)
   retry_ratio_factor: 0.5               # recovery failed -> back to the last accepted model, cut less
   max_retries: 2
   min_cut_ratio: 0.03

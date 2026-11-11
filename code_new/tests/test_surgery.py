@@ -296,6 +296,29 @@ def test_clean_mask_and_spill():
     print(f"clean mask: bridge cut, extra patch dropped; spill {m['spill']:.2f}, cleaned recall {m['recall']:.2f}")
 
 
+def test_index_slicing_and_registry():
+    assert S.index_pattern(8, 4) == [1, 3, 5, 7]
+    assert S.index_pattern(8, 4, 'first') == [0, 1, 2, 3] and S.index_pattern(8, 4, 'last') == [4, 5, 6, 7]
+    torch.manual_seed(0)
+    m = DefinitorNet(default_widths(16)).eval()
+    x = torch.randn(2, 3, 64, 64)
+    sel = S.select_units(m, 0.5, 2, (), 'index', 'interleaved')
+    assert sel['encoder1.0'] == list(range(1, 16, 2))
+    S.shrink(m, sel, 1.0)                        # fully strangled channels -> the cut changes nothing
+    with torch.no_grad():
+        y0 = m(x)
+    cmap = {}
+    for r in S.slice_record(m, sel, cmap):
+        cmap[r['layer_index']] = r['kept_original_indices']
+    m2 = S.cut(m, sel).eval()
+    with torch.no_grad():
+        assert float((y0 - m2(x)).abs().max()) < 1e-5
+    sel2 = S.select_units(m2, 0.5, 2, (), 'index', 'interleaved')
+    r = [r for r in S.slice_record(m2, sel2, cmap) if r['layer_index'] == 'encoder1.0'][0]
+    assert r['sliced_original_indices'] == [2, 6, 10, 14] and r['kept_original_indices'] == [0, 4, 8, 12]
+    print("index slicing: interleaved halves exact, registry keeps original indices")
+
+
 if __name__ == '__main__':
     for name, fn in list(globals().items()):
         if name.startswith('test_'):

@@ -13,6 +13,7 @@ Outputs (training-runs/<run.name>/):
     accepted/cycle_XX.pth   model that passed the gate after XX cuts (deployable)
     final_model.pth         the last accepted model
     state_last.pth          full resume point (written after every fold step)
+    slicing_registry.json   every cut: layer, removed indices (current + original numbering), kept indices
     backups/state_pass_*.pth  copies every logging.backup_every_passes passes (the newest backup_keep kept);
                             --resume falls back to them automatically if state_last.pth is damaged
     log.csv / steps.csv     one row per pass / per fold step
@@ -29,6 +30,7 @@ Outputs (training-runs/<run.name>/):
 """
 import argparse
 import csv
+import json
 import math
 import os
 import random
@@ -304,6 +306,7 @@ def main():
     schedule = SurgicalSchedule(sc)
     tracker = D.MistakeTracker(cfg.get('replay', {}))
     selection, pass_info, pass_buf = {}, None, {'loss': [], 'extra': 0}
+    registry, channel_map = [], {}  # slicing registry: every cut, in current and original channel numbering
     last_accepted, orig_params, step = None, None, 0
     lr = accepted_lr = float(cfg.training.lr)
     lrc = LrControl(cfg)
@@ -313,6 +316,15 @@ def main():
     plateau = {'best': float('inf'), 'wait': 0}
     pg = {}                       # plateau gate state of the current learn phase (gate.mode: plateau)
     accepted_score = None         # smoothed gate score of the last accepted model
+
+    def selection_mode():
+        """what decides the selected channels; a resumed selection made another way is redone"""
+        imp = str(sc.importance)
+        return f"{imp}:{sc.get('index_pattern', 'interleaved')}" if imp == 'index' else imp
+
+    def select_now_units():
+        return S.select_units(model, schedule.cut_ratio, int(sc.min_channels), task.cut_exclude(),
+                              str(sc.importance), str(sc.get('index_pattern', 'interleaved')))
 
     if args.resume:
         st = load_resume_state(run_dir, args.resume_from, log)
@@ -326,6 +338,23 @@ def main():
         plateau = st.get('plateau', plateau)
         pg, accepted_score = st.get('pg', {}), st.get('accepted_score')
         lrc.steps = st.get('lr_steps', 0)
+        registry, channel_map = st.get('registry', []), st.get('channel_map', {})
+        stored_mode = st.get('selection_mode', 'l1')   # states from before index selection used l1
+        if selection and stored_mode != selection_mode():
+            # the channels were chosen another way (e.g. l1 before index selection existed): choose them
+            # again from the current config and restart the penalty; dropout keeps its value
+            schedule.cut_ratio = float(sc.cut_ratio) * float(sc.retry_ratio_factor) ** schedule.retries
+            old_n = sum(len(v) for v in selection.values())
+            selection = select_now_units()
+            schedule.penalty = 0.0
+            if pass_info:
+                pass_info['penalty'], pass_info['apply_penalty'] = 0.0, False
+            log(f"selection was made by '{stored_mode}' ({old_n} units); re-selected by '{selection_mode()}' "
+                f"with ratio {schedule.cut_ratio:.3f}: {sum(len(v) for v in selection.values())} units "
+                f"({', '.join(f'{k}:{len(v)}' for k, v in selection.items())}); penalty restarts from 0 "
+                f"at dropout {schedule.dropout:.2f}")
+        if not selection:   # nothing selected yet: take cut_ratio from the (possibly edited) config
+            schedule.cut_ratio = float(sc.cut_ratio) * float(sc.retry_ratio_factor) ** schedule.retries
         log(f"resumed: pass {rotation.total_passes} step {step} cycle {schedule.cycle} phase {schedule.phase}")
     else:
         if cfg.model.init == 'checkpoint':
@@ -374,8 +403,15 @@ def main():
                      'tracker': tracker.state_dict(), 'selection': selection, 'pass_info': pass_info,
                      'pass_buf': pass_buf, 'last_accepted': last_accepted, 'orig_params': orig_params,
                      'step': step, 'lr': lr, 'accepted_lr': accepted_lr, 'phys_batch': phys_batch, 'accum': accum,
-                     'plateau': plateau, 'lr_steps': lrc.steps, 'pg': pg, 'accepted_score': accepted_score},
+                     'plateau': plateau, 'lr_steps': lrc.steps, 'pg': pg, 'accepted_score': accepted_score,
+                     'registry': registry, 'channel_map': channel_map, 'selection_mode': selection_mode()},
                     state_path)
+
+    def write_registry():
+        tmp = run_dir / 'slicing_registry.json.tmp'
+        tmp.write_text(json.dumps({'format': 'surgical-slicing-registry-v1', 'cuts': registry,
+                                   'channel_map': channel_map}, indent=1), encoding='utf-8')
+        os.replace(tmp, run_dir / 'slicing_registry.json')
 
     def backup_state():
         every = int(cfg.logging.get('backup_every_passes', 0))
@@ -494,8 +530,7 @@ def main():
                 pass_info = schedule.begin_pass()
                 model.set_dropout(pass_info['dropout'], list(sc.dropout_layers) if sc.get('dropout_layers') else None)
                 if pass_info['select_now']:
-                    selection = S.select_units(model, schedule.cut_ratio, int(sc.min_channels),
-                                               task.cut_exclude(), sc.importance)
+                    selection = select_now_units()
                     log(f"[cycle {schedule.cycle}] dropout reached {pass_info['dropout']:.2f}: selected "
                         f"{sum(len(v) for v in selection.values())} units to cut (ratio {schedule.cut_ratio:.3f}): "
                         + ', '.join(f"{k}:{len(v)}" for k, v in selection.items()))
@@ -633,7 +668,8 @@ def main():
                     path = run_dir / 'accepted' / f"cycle_{schedule.cycle:02d}.pth"
                     torch.save(model_file(model, cfg, task, {
                         'cycle': schedule.cycle, 'params': params, 'orig_params': orig_params,
-                        'metrics': {'fold': fm, 'test': tm}}), path)
+                        'metrics': {'fold': fm, 'test': tm},
+                        'slicing_registry': registry, 'channel_map': channel_map}), path)
                     last_accepted, accepted_lr = str(path), lr
                     write_samples(b, f"accepted_cycle_{schedule.cycle:02d}",
                                   f"ACCEPTED cycle {schedule.cycle}, pass {rotation.total_passes}, params {params:,}")
@@ -650,6 +686,13 @@ def main():
                         pg = {}
                 elif action == 'cut':
                     before = count_params(model)
+                    rec = S.slice_record(model, selection, channel_map)
+                    for r in rec:
+                        channel_map[r['layer_index']] = r['kept_original_indices']
+                    registry.append({'cycle': schedule.cycle, 'pass': rotation.total_passes,
+                                     'cut_ratio': schedule.cut_ratio, 'importance': str(sc.importance),
+                                     'layers': rec})
+                    write_registry()
                     model = S.cut(model, selection).to(device)
                     selection = {}
                     schedule.after_cut()
@@ -669,6 +712,10 @@ def main():
                             f"{Path(last_accepted).name}")
                         model = load_model_any(last_accepted).to(device)
                         selection = {}
+                        acc = torch.load(last_accepted, map_location='cpu', weights_only=False)
+                        registry = acc.get('slicing_registry', [])
+                        channel_map = acc.get('channel_map', {})
+                        write_registry()
                         if schedule.retry_smaller():
                             lr = accepted_lr
                             opt = make_optimizer(model, cfg, lr); lrc.reset()
