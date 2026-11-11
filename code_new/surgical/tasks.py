@@ -173,6 +173,18 @@ class ClassifierTask:
         return F.binary_cross_entropy_with_logits(logits.float(), y.float(), pos_weight=pw,
                                                   reduction='none').mean(1)          # per sample
 
+    def score(self, m):
+        """one number for the plateau gate: harmonic mean of accuracy and recall"""
+        a, r = m.get('acc', float('nan')), m.get('recall', float('nan'))
+        if math.isnan(a) or math.isnan(r) or a + r == 0:
+            return 0.0
+        return 2 * a * r / (a + r)
+
+    def per_image(self, logits, y):
+        p = torch.sigmoid(logits.float())
+        err = (p - y.float()).abs().max(1).values
+        return [{'error': float(e), 'recall': float('nan'), 'precision': float('nan')} for e in err]
+
     def sample_error(self, logits, y):
         """0..1 per sample: the worst label's distance from its target (>= 0.5 = that label is wrong)"""
         return (torch.sigmoid(logits.float()) - y.float()).abs().max(1).values
@@ -364,6 +376,29 @@ class DefinitorTask:
         tp = (p * y).sum((1, 2, 3)); fp = (p * (1 - y)).sum((1, 2, 3)); fn = ((1 - p) * y).sum((1, 2, 3))
         return (tp + s) / (tp + self.tv_a * fp + self.tv_b * fn + s)
 
+    def score(self, m):
+        """one number for the plateau gate: F2 of the cleaned mask (recall counts 4x as much as precision)"""
+        r, p = m.get('recall', float('nan')), m.get('precision', float('nan'))
+        if math.isnan(r) or math.isnan(p) or r + p == 0:
+            return 0.0
+        return 5 * p * r / (4 * p + r)
+
+    def per_image(self, logits, y):
+        """recall / precision of the cleaned mask and the error, per image (for the worst-case report)"""
+        from .disc_crop import clean_mask
+        g = self.cfg.gate
+        prob = torch.sigmoid(logits.float())[:, 0].cpu().numpy()
+        t = (y[:, 0] >= 0.5).cpu().numpy()
+        err = self.sample_error(logits, y).tolist()
+        out = []
+        for pr, tt, e in zip(prob, t, err):
+            c = clean_mask(pr >= float(g.decision_threshold), float(g.get('open_frac', 0.03)))
+            tp, fn, fp = int((c & tt).sum()), int((~c & tt).sum()), int((c & ~tt).sum())
+            out.append({'error': float(e), 'recall': tp / (tp + fn) if tp + fn else float('nan'),
+                        'precision': tp / (tp + fp) if tp + fp else float('nan'),
+                        'disc_px_true': int(tt.sum()), 'disc_px_found': int(c.sum())})
+        return out
+
     def sample_error(self, logits, y):
         """0..1 per image: 1 - Tversky score of the thresholded prediction (pixels guessed right or wrong;
         a missed disc pixel weighs more than an extra one)"""
@@ -391,10 +426,10 @@ class DefinitorTask:
                 'spill', 'pieces']
 
     @torch.no_grad()
-    def render_samples(self, model, samples, store, indices, device, out_path, title=''):
-        """One PNG: per image [input as the network sees it | raw definitor output], the output is the
-        probability 0..1 shown as black..white, nothing drawn on top. Caption: per-image recall /
-        precision of the cleaned mask (what the pipeline keeps)."""
+    def render_samples(self, model, samples, store, indices, device, out_path, title='', with_truth=False):
+        """One PNG: per image [input as the network sees it | raw definitor output (| true mask)], the
+        output is the probability 0..1 shown as black..white, nothing drawn on top. Caption: per-image
+        recall / precision of the cleaned mask (what the pipeline keeps)."""
         from PIL import ImageDraw
         from .disc_crop import clean_mask
         model.eval()
@@ -413,13 +448,14 @@ class DefinitorTask:
             tp, fn, fp = int((c & t).sum()), int((~c & t).sum()), int((c & ~t).sum())
             rec = f"{tp / (tp + fn):.2f}" if tp + fn else "no disc"
             prec = f"{tp / (tp + fp):.2f}" if tp + fp else "-"
-            pil = Image.fromarray(np.concatenate([img, out], 1))
+            panels = [img, out] + ([np.repeat((t * 255).astype(np.uint8)[..., None], 3, axis=2)] if with_truth else [])
+            pil = Image.fromarray(np.concatenate(panels, 1))
             ImageDraw.Draw(pil).text((4, 3), f"{Path(s.path).stem}  recall {rec}  precision {prec}",
                                      fill=(255, 255, 255), font=font)
             rows.append(np.asarray(pil))
         if not rows:
             return
-        cols = 2 if len(rows) > 3 else 1
+        cols = (1 if with_truth else 2) if len(rows) > 3 else 1
         while len(rows) % cols:
             rows.append(np.zeros_like(rows[0]))
         sep = np.full((rows[0].shape[0], 4, 3), 64, np.uint8)            # thin grey gap between pairs
@@ -433,8 +469,9 @@ class DefinitorTask:
         grid = np.concatenate([x for ln in lines for x in (ln, gap)][:-1], 0)
         head = np.zeros((18, grid.shape[1], 3), np.uint8)
         pil = Image.fromarray(np.concatenate([head, grid], 0))
-        ImageDraw.Draw(pil).text((4, 2), title + "   left: input, right: definitor output (black 0 .. white 1)",
-                                 fill=(255, 255, 255), font=font)
+        legend = ("   input | definitor output (black 0 .. white 1) | true mask" if with_truth
+                  else "   left: input, right: definitor output (black 0 .. white 1)")
+        ImageDraw.Draw(pil).text((4, 2), title + legend, fill=(255, 255, 255), font=font)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         pil.save(out_path)
 

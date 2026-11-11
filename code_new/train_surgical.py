@@ -17,6 +17,10 @@ Outputs (training-runs/<run.name>/):
                             --resume falls back to them automatically if state_last.pth is damaged
     log.csv / steps.csv     one row per pass / per fold step
     mistakes.csv            samples ordered by error (what mistake replay repeats)
+    test_per_image.csv      every pass: recall / precision / error of every held-out image
+    worst/*.png + .csv      the worst held-out images (input | output | true mask), every
+                            logging.worst_every_passes passes and at every accepted model
+    best_in_phase.pth       gate.mode plateau: best weights of the current learn phase
     samples/pass_NNNN_images.png + pass_NNNN_masks.png   definitor: inputs and predicted masks (white on
                             black) of fixed held-out images + the current worst mistakes, same grid;
                             every logging.sample_every_passes passes; accepted_cycle_XX_* at each accept
@@ -218,8 +222,9 @@ def train_fold(model, task, b, indices, opt, scaler, device, use_amp, cfg, pass_
 
 
 @torch.no_grad()
-def evaluate(model, task, b, indices, device, use_amp, acc, tracker=None):
-    """Adds predictions to `acc`; per-sample losses go to the mistake tracker. Returns mean loss."""
+def evaluate(model, task, b, indices, device, use_amp, acc, tracker=None, per_image=None):
+    """Adds predictions to `acc`; per-sample errors go to the mistake tracker; per-image results are
+    appended to `per_image` as (sample index, dict) if a list is given. Returns mean loss."""
     model.eval()
     b.eval_sampler.set(indices)
     losses, paths, errs = [], [], []
@@ -233,6 +238,8 @@ def evaluate(model, task, b, indices, device, use_amp, acc, tracker=None):
         if tracker is not None:
             paths += [b.samples[i].path for i in idx.tolist()]
             errs += task.sample_error(logits, y).tolist()
+        if per_image is not None:
+            per_image += list(zip(idx.tolist(), task.per_image(logits, y)))
     if tracker is not None:
         tracker.update(paths, errs)
     return float(np.mean(losses)) if losses else float('nan')
@@ -304,6 +311,8 @@ def main():
     eff_batch = int(cfg.training.get('effective_batch_size') or phys_batch)
     accum = max(1, round(eff_batch / phys_batch))
     plateau = {'best': float('inf'), 'wait': 0}
+    pg = {}                       # plateau gate state of the current learn phase (gate.mode: plateau)
+    accepted_score = None         # smoothed gate score of the last accepted model
 
     if args.resume:
         st = load_resume_state(run_dir, args.resume_from, log)
@@ -315,6 +324,7 @@ def main():
         accepted_lr = st.get('accepted_lr', lr)
         phys_batch, accum = st.get('phys_batch', phys_batch), st.get('accum', accum)
         plateau = st.get('plateau', plateau)
+        pg, accepted_score = st.get('pg', {}), st.get('accepted_score')
         lrc.steps = st.get('lr_steps', 0)
         log(f"resumed: pass {rotation.total_passes} step {step} cycle {schedule.cycle} phase {schedule.phase}")
     else:
@@ -364,7 +374,8 @@ def main():
                      'tracker': tracker.state_dict(), 'selection': selection, 'pass_info': pass_info,
                      'pass_buf': pass_buf, 'last_accepted': last_accepted, 'orig_params': orig_params,
                      'step': step, 'lr': lr, 'accepted_lr': accepted_lr, 'phys_batch': phys_batch, 'accum': accum,
-                     'plateau': plateau, 'lr_steps': lrc.steps}, state_path)
+                     'plateau': plateau, 'lr_steps': lrc.steps, 'pg': pg, 'accepted_score': accepted_score},
+                    state_path)
 
     def backup_state():
         every = int(cfg.logging.get('backup_every_passes', 0))
@@ -401,6 +412,79 @@ def main():
         except Exception as e:                                    # never stop training for a picture
             log(f"[samples] could not write {name}.png: {type(e).__name__}: {e}")
 
+    last_test_rows = {'rows': [], 'bundle': None}
+
+    def write_test_rows(b, rows, sched):
+        """per-image results of the held-out patients, appended every pass -> test_per_image.csv"""
+        last_test_rows['rows'], last_test_rows['bundle'] = rows, b
+        path = run_dir / 'test_per_image.csv'
+        new = not path.exists()
+        with open(path, 'a', encoding='utf-8', newline='') as f:
+            w = csv.writer(f)
+            if new:
+                w.writerow(['pass', 'cycle', 'phase', 'dataset', 'image', 'recall', 'precision', 'error',
+                            'disc_px_true', 'disc_px_found'])
+            for i, r in rows:
+                w.writerow([rotation.total_passes, sched.cycle, sched.phase, b.name, Path(b.samples[i].path).name,
+                            f"{r['recall']:.4f}", f"{r['precision']:.4f}", f"{r['error']:.4f}",
+                            r.get('disc_px_true', ''), r.get('disc_px_found', '')])
+
+    def write_worst(b, name, force=False):
+        """worst/<name>.png + .csv: the worst held-out images (input | output | true mask)"""
+        every = int(cfg.logging.get('worst_every_passes', 5))
+        if not force and (every <= 0 or rotation.total_passes % every):
+            return
+        rows = [r for r in last_test_rows['rows']] if last_test_rows['bundle'] is b else []
+        if not rows:
+            return
+        rows.sort(key=lambda r: -r[1]['error'])
+        rows = rows[:int(cfg.logging.get('worst_count', 8))]
+        wdir = run_dir / 'worst'
+        wdir.mkdir(exist_ok=True)
+        with open(wdir / f"{name}.csv", 'w', encoding='utf-8', newline='') as f:
+            w = csv.writer(f)
+            w.writerow(['image', 'recall', 'precision', 'error', 'path'])
+            for i, r in rows:
+                w.writerow([Path(b.samples[i].path).name, f"{r['recall']:.4f}", f"{r['precision']:.4f}",
+                            f"{r['error']:.4f}", b.samples[i].path])
+        try:
+            task.render_samples(model, b.samples, b.store, [i for i, _ in rows], device, wdir / f"{name}.png",
+                                f"worst held-out images, {name}", with_truth=True)
+        except Exception as e:
+            log(f"[worst] could not write {name}.png: {type(e).__name__}: {e}")
+
+    def plateau_gate(m, floors_ok):
+        """gate.mode plateau. Score = task.score (definitor: F2, recall-weighted), smoothed over passes.
+        Learn phase: accept the best model of the phase once the score has not improved for
+        plateau_passes passes - if it meets the floors (gate.recall / precision / max_spill) and, after a
+        cut, is within max_drop of the accepted model's score; give up (-> retry smaller cut) if a
+        plateau is reached below that. Ramp: degraded = score below accepted - max_drop - tolerance."""
+        g = cfg.gate
+        s = task.score(m)
+        s = 0.0 if s is None or math.isnan(s) else s
+        pg['ema'] = s if pg.get('ema') is None else 0.5 * pg['ema'] + 0.5 * s
+        max_drop, tol = float(g.get('max_drop', 0.02)), float(g.get('degrade_tolerance', 0.02))
+        if schedule.phase != 'learn':
+            ref = accepted_score if accepted_score is not None else pg['ema']
+            return False, pg['ema'] < ref - max_drop - tol, False
+        if pg['ema'] > pg.get('best', -1.0) + float(g.get('plateau_min_delta', 0.002)):
+            pg.update(best=pg['ema'], since=0, best_floors_ok=bool(floors_ok))
+            snap = run_dir / 'best_in_phase.pth'
+            atomic_save({'model': {k: v.detach().cpu() for k, v in model.state_dict().items()},
+                         'fold': fm_holder['fm'], 'test': fm_holder['tm'], 'pass': rotation.total_passes,
+                         'score': pg['ema']}, snap)
+            pg['snapshot'] = str(snap)
+        else:
+            pg['since'] = pg.get('since', 0) + 1
+        plateaued = pg['since'] >= int(g.get('plateau_passes', 6))
+        target = None if accepted_score is None else accepted_score - max_drop
+        good = pg.get('best_floors_ok', False) and (target is None or pg['best'] >= target)
+        log(f"[gate] score {s:.4f} smoothed {pg['ema']:.4f}, best {pg['best']:.4f} "
+            f"({pg['since']} passes without improvement)" + (f", target {target:.4f}" if target is not None else ''))
+        give_up = plateaued and not good and target is not None
+        return plateaued and good, False, give_up
+
+    fm_holder = {'fm': {}, 'tm': {}}
     done, reason = False, ''
     fold_acc = task.new_accumulator()
     t_pass = time.time()
@@ -459,14 +543,35 @@ def main():
                     S.shrink(model, selection, pass_info['penalty'])
                 sel_ratio = S.selected_norm_ratio(model, selection) if selection else float('nan')
                 fm = fold_acc.result()
-                tm, t_loss = {}, float('nan')
+                tm, t_loss, test_rows = {}, float('nan'), []
                 if b.test_idx:
                     ta = task.new_accumulator()
-                    t_loss = evaluate(model, task, b, b.test_idx, device, use_amp, ta)
+                    test_rows = []
+                    t_loss = evaluate(model, task, b, b.test_idx, device, use_amp, ta, per_image=test_rows)
                     tm = ta.result()
+                    write_test_rows(b, test_rows, schedule)
+                fm_holder['fm'], fm_holder['tm'] = fm, tm
                 g_src = 'test' if cfg.gate.source == 'test' and tm else 'folds'
                 gm = tm if g_src == 'test' else fm
                 passed, degraded = task.gate(gm)
+                give_up, immediate = False, False
+                gmode = str(cfg.gate.get('mode', 'average'))
+                if gmode == 'plateau':
+                    passed, degraded, give_up = plateau_gate(gm, passed)
+                    immediate = True
+                elif gmode == 'average':
+                    # thresholds on the mean of the last `window` passes of this phase (noise-proof)
+                    hist = pg.setdefault('hist', [])
+                    hist.append({k: v for k, v in gm.items() if isinstance(v, (int, float))})
+                    del hist[:-int(cfg.gate.get('window', 5))]
+                    keys = set().union(*hist)
+                    avg = {k: float(np.nanmean([h.get(k, float('nan')) for h in hist])) for k in keys}
+                    passed, degraded = task.gate(avg)
+                    passed = passed and len(hist) >= min(int(cfg.gate.get('window', 5)), 3)
+                    immediate = True
+                    log(f"[gate] mean of the last {len(hist)} passes ({g_src}): {task.short(avg)}")
+                elif gmode != 'absolute':
+                    sys.exit(f"gate.mode must be average | plateau | absolute, got {gmode!r}")
                 gap = (fm.get('gate_recall', float('nan')) - tm.get('gate_recall', float('nan'))) if tm else float('nan')
                 # reduce-on-plateau, learn phase only. Signal: the next-fold test loss of the pass (every
                 # sample once, far less noisy than the few held-out patients), smoothed over passes.
@@ -490,7 +595,7 @@ def main():
                                     f"lr {lr:.2e} (reduction {plateau['cuts']} of "
                                     f"{cfg.training.get('plateau_max_reductions', 3)} in this phase)")
                 phase_before, cycle_before = schedule.phase, schedule.cycle
-                action = schedule.end_pass(passed, degraded)
+                action = schedule.end_pass(passed, degraded, give_up, immediate)
                 params = count_params(model)
                 pass_log.row(time=datetime.now().isoformat(timespec='seconds'), **{'pass': rotation.total_passes},
                              cycle=cycle_before, phase=phase_before, dataset=b.name, dropout=pass_info['dropout'],
@@ -501,6 +606,7 @@ def main():
                              sel_norm_ratio=sel_ratio, action=action,
                              **{f'fold_{k}': fm.get(k) for k in mf}, **{f'test_{k}': tm.get(k) for k in mf})
                 tracker.write_csv(run_dir / 'mistakes.csv')
+                write_worst(b, f"pass_{rotation.total_passes:04d}")
                 every = int(cfg.logging.get('sample_every_passes', 1))
                 if every > 0 and rotation.total_passes % every == 0:
                     write_samples(b, f"pass_{rotation.total_passes:04d}",
@@ -516,6 +622,14 @@ def main():
                     + (f" | fold-test recall gap {gap:+.3f}" if not math.isnan(gap) else '') + f" -> {action}")
 
                 if action == 'accept':
+                    if pg.get('snapshot') and Path(pg['snapshot']).is_file():
+                        snap = torch.load(pg['snapshot'], map_location='cpu', weights_only=False)
+                        model.load_state_dict(snap['model'])
+                        fm, tm = snap['fold'], snap['test']
+                        log(f"[gate] plateau reached: taking the best model of this phase (pass {snap['pass']}, "
+                            f"score {snap['score']:.4f})")
+                    accepted_score = pg.get('best') if pg else task.score(tm if tm else fm)
+                    pg = {}
                     path = run_dir / 'accepted' / f"cycle_{schedule.cycle:02d}.pth"
                     torch.save(model_file(model, cfg, task, {
                         'cycle': schedule.cycle, 'params': params, 'orig_params': orig_params,
@@ -523,6 +637,7 @@ def main():
                     last_accepted, accepted_lr = str(path), lr
                     write_samples(b, f"accepted_cycle_{schedule.cycle:02d}",
                                   f"ACCEPTED cycle {schedule.cycle}, pass {rotation.total_passes}, params {params:,}")
+                    write_worst(b, f"accepted_cycle_{schedule.cycle:02d}", force=True)
                     schedule.after_accept()
                     log(f"[cycle {schedule.cycle}] ACCEPTED -> {path.name} ({params:,} params, "
                         f"{params / orig_params:.1%} of start)")
@@ -532,6 +647,7 @@ def main():
                         done, reason = True, f"target size reached ({params / orig_params:.1%} of start)"
                     else:
                         schedule.start_ramp()
+                        pg = {}
                 elif action == 'cut':
                     before = count_params(model)
                     model = S.cut(model, selection).to(device)
@@ -540,6 +656,7 @@ def main():
                     lr = max(float(cfg.training.lr_min), accepted_lr * float(cfg.training.lr_cycle_decay))
                     opt = make_optimizer(model, cfg, lr); lrc.reset()
                     plateau = {'best': float('inf'), 'wait': 0}
+                    pg = {}
                     after = count_params(model)
                     log(f"[cycle {schedule.cycle}] CUT: {before:,} -> {after:,} params ({after / orig_params:.1%} "
                         f"of start), lr {lr:.2e}")
@@ -556,6 +673,7 @@ def main():
                             lr = accepted_lr
                             opt = make_optimizer(model, cfg, lr); lrc.reset()
                             plateau = {'best': float('inf'), 'wait': 0}
+                            pg = {}
                             log(f"  retry {schedule.retries} with cut ratio {schedule.cut_ratio:.3f}")
                         else:
                             done, reason = True, "recovery failed and no retry left"

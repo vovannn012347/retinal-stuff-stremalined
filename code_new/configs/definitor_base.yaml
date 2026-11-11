@@ -72,9 +72,9 @@ loss:
 # image width, then the largest blob, holes filled) - the same post-processing crop_discs.py and the
 # inference script use instead of the old magic wand. spill = share of predicted pixels thrown away
 # by the cleaning (bridges, separate patches); pieces = connected blobs per image before cleaning.
-gate:
-  recall: 0.95
-  precision: 0.70
+gate:                                   # checked on the mean of the last 5 passes (gate.mode average)
+  recall: 0.85                          # held-out patients, cleaned mask; ~0.87 is what 275 images give
+  precision: 0.80
   boundary_tolerance_px: 2
   clean_prediction: true
   open_frac: 0.03

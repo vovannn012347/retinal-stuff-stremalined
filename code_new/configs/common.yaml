@@ -74,6 +74,21 @@ training:
 # = recall on folds - recall on test; a growing gap means the network memorises.
 gate:
   source: test                          # test | folds  (falls back to folds if there is no test split)
+  # mode average:  accept when the MEAN of the last `window` passes meets the thresholds (one bad
+  #   pass no longer resets it; at least 3 passes of the phase). During the ramp the same mean
+  #   decides whether the ramp pauses (below threshold - degrade_tolerance).
+  # mode absolute: accept when the thresholds hold gate_consecutive_passes single passes in a row.
+  # mode plateau:  the thresholds are only floors. Accept the BEST model of the learn phase once the
+  #   score (definitor: F2 of the cleaned mask - recall counts 4x; classifier: harmonic mean of
+  #   accuracy and recall), smoothed over passes, has not improved for plateau_passes passes.
+  #   After a cut the recovered model must come within max_drop of the accepted model's score,
+  #   otherwise -> back to the accepted model and a smaller cut. During the ramp the ramp pauses
+  #   when the score falls below accepted - max_drop - degrade_tolerance.
+  mode: average
+  window: 5
+  plateau_passes: 6
+  plateau_min_delta: 0.002
+  max_drop: 0.02
   decision_threshold: 0.5
   degrade_tolerance: 0.02               # during the ramp: below gate - tolerance => hold the ramp
 
@@ -121,5 +136,10 @@ logging:
   sample_every_passes: 1                # 0 = off
   sample_count: 8
   sample_worst: 4
+  # worst-case report: <run>/worst/pass_NNNN.png + .csv with the worst held-out images
+  # (input | output | true mask), every N passes and at every accepted model;
+  # <run>/test_per_image.csv has every held-out image's result for every pass
+  worst_every_passes: 5
+  worst_count: 8
   sample_mask: prob                     # prob (grey = probability) | binary (thresholded) | cleaned (what is kept)
   sample_columns: 4

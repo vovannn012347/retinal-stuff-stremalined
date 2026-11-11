@@ -64,15 +64,17 @@ class SurgicalSchedule:
         return {'dropout': self.dropout, 'penalty': self.penalty if self.penalty_active else 0.0,
                 'select_now': select_now, 'apply_penalty': apply_penalty, 'holding': self.holding}
 
-    def end_pass(self, gate_passed: bool, degraded: bool):
-        """Returns one of: continue | accept | cut | fail."""
+    def end_pass(self, gate_passed: bool, degraded: bool, give_up: bool = False, immediate: bool = False):
+        """Returns one of: continue | accept | cut | fail.
+        immediate: the caller already applied its own stability rule (plateau gate) - no streak needed.
+        give_up:   the caller decided the learn phase cannot reach its target any more."""
         self.phase_passes += 1
         if self.phase == 'learn':
             self.gate_streak = self.gate_streak + 1 if gate_passed else 0
-            if (self.gate_streak >= int(self.c.get('gate_consecutive_passes', 1))
-                    and self.phase_passes >= int(self.c['min_learn_passes'])):
+            need = 1 if immediate else int(self.c.get('gate_consecutive_passes', 1))
+            if self.gate_streak >= need and self.phase_passes >= int(self.c['min_learn_passes']):
                 return 'accept'
-            if self.phase_passes >= self.max_learn():
+            if give_up or self.phase_passes >= self.max_learn():
                 return 'fail'
             return 'continue'
 

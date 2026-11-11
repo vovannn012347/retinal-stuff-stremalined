@@ -46,7 +46,7 @@ training:
   new_layers_lr_mult: 10                # intermediate conv + fc start from random: 1e-3
   pos_weight: [2.0, 2.0, 1.0]           # BCE weight of positives per label (pushes recall up)
 
-gate:
+gate:                                   # checked on the mean of the last 5 passes (gate.mode average)
   accuracy: 0.90                        # mean per-label accuracy over accuracy_labels
   recall: 0.95                          # recall must be > this, min over recall_labels
   accuracy_labels: [glaucoma, atrophy, valid_image]
