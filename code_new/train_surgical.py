@@ -531,6 +531,10 @@ def main():
                 model.set_dropout(pass_info['dropout'], list(sc.dropout_layers) if sc.get('dropout_layers') else None)
                 if pass_info['select_now']:
                     selection = select_now_units()
+                    if not selection:
+                        done, reason = True, f"nothing left to cut (every layer at min_channels {sc.min_channels})"
+                        pass_info = None
+                        break
                     log(f"[cycle {schedule.cycle}] dropout reached {pass_info['dropout']:.2f}: selected "
                         f"{sum(len(v) for v in selection.values())} units to cut (ratio {schedule.cut_ratio:.3f}): "
                         + ', '.join(f"{k}:{len(v)}" for k, v in selection.items()))
