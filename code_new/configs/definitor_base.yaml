@@ -61,6 +61,13 @@ loss:
   tversky_weight: 1.0                   # + Tversky loss
   tversky_alpha: 0.4                    # weight of false positives
   tversky_beta: 0.6                     # weight of false negatives (slightly above alpha: mild recall bias)
+  # Island-aware weights (1.0 = off). The pipeline takes every island as a candidate crop and the
+  # classifier rejects wrong ones; a disc FUSED with a vessel / lesion / glare breaks it. So:
+  ring_weight: 1.0                      # e.g. 5: background close around the disc weighs more (hard edge)
+  ring_frac: 0.15                       #   ... fading to 1 at this fraction of the disc diameter
+  bridge_weight: 1.0                    # e.g. 5: false pixels in the disc's own blob (bridges) weigh more,
+  bridge_max_scale: 3.0                 #   x (1 + leaked area / disc area), at most x this; separate islands x1
+  bridge_margin_frac: 0.02              # pixels within this x image size of the disc edge are edge error, not bridge
 
 # Pixel metrics pooled over the pass:
 #   recall    = correctly found disc pixels / all disc pixels       TP / (TP + FN)
@@ -79,3 +86,5 @@ gate:                                   # checked on the mean of the last 5 pass
   clean_prediction: true
   open_frac: 0.03
   max_spill: 0.15                       # the raw prediction may not scatter more than 15 % of its pixels
+  # max_bleed: 0.10                     # optional: bleed (pixels hanging on to the disc's blob outside it
+                                        #   / disc pixels) may not exceed this; logged as 'bleed' either way

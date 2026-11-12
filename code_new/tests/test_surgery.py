@@ -319,6 +319,34 @@ def test_index_slicing_and_registry():
     print("index slicing: interleaved halves exact, registry keeps original indices")
 
 
+def test_bridge_weights():
+    from surgical.tasks import bridge_weights, bleed_pixels
+    H = 96
+    yy, xx = np.mgrid[0:H, 0:H]
+    true = ((yy - 48) ** 2 + (xx - 30) ** 2 < 12 ** 2)[None]
+    fused = true.copy(); fused[0, 44:52, 42:80] = True          # bar attached to the disc
+    island = true.copy(); island[0, 44:52, 50:88] = True        # same size bar, separate (gap)
+    assert (fused & ~true).sum() == (island & ~true).sum()
+    wf = bridge_weights(fused, true, bridge_w=5.0)
+    wi = bridge_weights(island, true, bridge_w=5.0)
+    assert wf[fused & ~true].mean() > 4 and abs(wi[island & ~true].mean() - 1) < 1e-6
+    bf, d = bleed_pixels(fused, true); bi, _ = bleed_pixels(island, true)
+    assert bf > 0 and bi == 0
+    wr = bridge_weights(island, true, ring_w=5.0)
+    assert wr[0, 48, 44] > wr[0, 48, 70] >= 1 and wr[0, 48, 30] == 1
+    # weighted loss: fused prediction costs more than the same false pixels as a separate island
+    from types import SimpleNamespace
+    from surgical.tasks import DefinitorTask
+    cfg = load_config(str(Path(__file__).resolve().parents[1] / 'configs' / 'definitor_cpu.yaml'))
+    cfg.loss['bridge_weight'] = 5.0
+    task = DefinitorTask(cfg, print)
+    y = torch.from_numpy(true[None].astype(np.float32))
+    lf = task.loss(torch.from_numpy(np.where(fused, 4.0, -4.0)[None].astype(np.float32)), y)
+    li = task.loss(torch.from_numpy(np.where(island, 4.0, -4.0)[None].astype(np.float32)), y)
+    assert float(lf) > float(li), (float(lf), float(li))
+    print(f"bridge loss: fused {float(lf):.3f} > separate island {float(li):.3f}; bleed {bf / d:.2f} vs 0")
+
+
 if __name__ == '__main__':
     for name, fn in list(globals().items()):
         if name.startswith('test_'):

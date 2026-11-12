@@ -67,7 +67,12 @@ class Logger:
 
 class CsvLog:
     def __init__(self, path: Path, fields):
-        new = not path.exists()
+        new = not path.exists() or path.stat().st_size == 0
+        if not new:   # resumed run: keep the columns the file already has (a newer code version may log more)
+            with open(path, encoding='utf-8', newline='') as f:
+                head = next(csv.reader(f), None)
+            if head:
+                fields = head
         self.f = open(path, 'a', encoding='utf-8', newline='')
         self.w = csv.DictWriter(self.f, fieldnames=fields, extrasaction='ignore')
         if new:

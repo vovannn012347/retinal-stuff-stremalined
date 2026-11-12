@@ -268,6 +268,11 @@ class DefinitorTask:
         self.pos_weight = float(lo.get('pos_weight', 3.0))
         self.tv_w = float(lo.get('tversky_weight', 1.0))
         self.tv_a, self.tv_b = float(lo.get('tversky_alpha', 0.3)), float(lo.get('tversky_beta', 0.7))
+        # island-aware weights (0 / 1 = off): see bridge_weights()
+        self.ring_w, self.ring_frac = float(lo.get('ring_weight', 1.0)), float(lo.get('ring_frac', 0.15))
+        self.bridge_w = float(lo.get('bridge_weight', 1.0))
+        self.bridge_max = float(lo.get('bridge_max_scale', 3.0))
+        self.margin_frac = float(lo.get('bridge_margin_frac', 0.02))
 
     # data
     def scan(self, ds_cfg) -> List[D.Sample]:
@@ -362,7 +367,13 @@ class DefinitorTask:
     def loss(self, logits, y):
         logits, y = logits.float(), y.float()
         pw = torch.tensor(self.pos_weight, device=logits.device)
-        bce = F.binary_cross_entropy_with_logits(logits, y, pos_weight=pw, reduction='none').mean((1, 2, 3))
+        bce = F.binary_cross_entropy_with_logits(logits, y, pos_weight=pw, reduction='none')
+        if self.ring_w > 1 or self.bridge_w > 1:
+            w = bridge_weights((torch.sigmoid(logits.detach()) >= float(self.cfg.gate.decision_threshold))[:, 0]
+                               .cpu().numpy(), (y[:, 0] >= 0.5).cpu().numpy(), self.ring_w, self.ring_frac,
+                               self.bridge_w, self.bridge_max, self.margin_frac)
+            bce = bce * torch.from_numpy(w)[:, None].to(bce.device)
+        bce = bce.mean((1, 2, 3))
         if self.tv_w <= 0:
             return bce
         p = torch.sigmoid(logits)
@@ -408,22 +419,24 @@ class DefinitorTask:
     def new_accumulator(self):
         g = self.cfg.gate
         return _SegAcc(float(g.decision_threshold), self.tol, bool(g.get('clean_prediction', True)),
-                       float(g.get('open_frac', 0.03)))
+                       float(g.get('open_frac', 0.03)), self.margin_frac)
 
     def gate(self, m):
         g = self.cfg.gate
         rec, prec = m['recall'], m['precision']
         spill, max_spill = m.get('spill', float('nan')), float(g.get('max_spill', 1.0))
         spill_ok = math.isnan(spill) or spill <= max_spill
+        bleed, max_bleed = m.get('bleed', float('nan')), g.get('max_bleed')
+        bleed_ok = max_bleed is None or math.isnan(bleed) or bleed <= float(max_bleed)
         passed = (not math.isnan(rec) and rec >= g['recall'] and not math.isnan(prec) and prec >= g['precision']
-                  and spill_ok)
+                  and spill_ok and bleed_ok)
         tol = g.get('degrade_tolerance', 0.02)
         degraded = math.isnan(rec) or rec < g['recall'] - tol or prec < g['precision'] - tol
         return passed, degraded
 
     def metric_fields(self):
         return ['recall', 'precision', 'strict_recall', 'strict_precision', 'iou', 'dice', 'img_recall_min',
-                'spill', 'pieces']
+                'spill', 'pieces', 'bleed']
 
     @torch.no_grad()
     def render_samples(self, model, samples, store, indices, device, out_path, title='', with_truth=False):
@@ -486,14 +499,17 @@ class _SegAcc:
     true mask edge are not counted at all (the hand-drawn edge is uncertain by about that much);
     strict (untolerant) recall/precision are reported too."""
 
-    def __init__(self, thr, tol=0, clean=True, open_frac=0.03):
-        self.thr, self.tol, self.clean, self.open_frac = thr, tol, clean, open_frac
-        self.c = {'tp': 0, 'fp': 0, 'fn': 0, 'stp': 0, 'sfp': 0, 'sfn': 0, 'raw': 0, 'kept': 0, 'pieces': 0, 'n': 0}
+    def __init__(self, thr, tol=0, clean=True, open_frac=0.03, margin_frac=0.02):
+        self.thr, self.tol, self.clean, self.open_frac, self.margin_frac = thr, tol, clean, open_frac, margin_frac
+        self.c = {'tp': 0, 'fp': 0, 'fn': 0, 'stp': 0, 'sfp': 0, 'sfn': 0, 'raw': 0, 'kept': 0, 'pieces': 0, 'n': 0,
+                  'bleed': 0, 'disc': 0}
         self.img_rec = []
 
     def add(self, logits, y):
         raw = torch.sigmoid(logits.float()) >= self.thr
         t = y >= 0.5
+        b, d = bleed_pixels(raw[:, 0].cpu().numpy(), t[:, 0].cpu().numpy(), self.margin_frac)
+        self.c['bleed'] += b; self.c['disc'] += d
         if self.clean:
             # what the pipeline will actually use: opening + largest blob (see disc_crop.clean_mask)
             import cv2
@@ -536,9 +552,76 @@ class _SegAcc:
              'img_recall_min': min(self.img_rec) if self.img_rec else float('nan'),
              # spill: share of predicted pixels outside the kept disc blob (bridges, separate patches)
              'spill': 1 - c['kept'] / c['raw'] if c['raw'] else float('nan'),
-             'pieces': c['pieces'] / c['n'] if c['n'] else float('nan')}
+             'pieces': c['pieces'] / c['n'] if c['n'] else float('nan'),
+             # bleed: predicted pixels that hang on to the disc's own blob outside the disc (bridges to
+             # vessels / lesions / glare) per true disc pixel. Separate islands are NOT bleed.
+             'bleed': c['bleed'] / c['disc'] if c['disc'] else float('nan')}
         m['gate_main'], m['gate_recall'] = prec, rec
         return m
+
+
+# ── island-aware loss weights ──────────────────────────────────────────────────────────────────
+# The pipeline takes every island of the prediction as a candidate and the classifier rejects the wrong
+# ones; what breaks it is a disc FUSED with something else (one big blob). So:
+#   ring:   background pixels close around the true disc weigh more (ring_weight, fading to 1 at
+#           ring_frac x disc diameter) - teaches a hard edge where bridges start;
+#   bridge: false pixels that belong to the same predicted blob as the disc (and lie more than
+#           margin_frac x size outside it) weigh bridge_weight x (1 + leaked area / disc area), at most
+#           bridge_weight x bridge_max_scale - a big fused region costs much more than a fringe;
+#   separate islands keep weight 1 (still an error, but a cheap one).
+
+def _margin_px(shape, margin_frac):
+    return max(1, int(round(margin_frac * max(shape))))
+
+
+def _disc_blob(pred, true, margin):
+    """(blob pixels of every predicted component touching the true disc, true disc dilated by margin)"""
+    import cv2
+    n, lab = cv2.connectedComponents(pred.astype(np.uint8), connectivity=8)
+    if n <= 1 or not true.any():
+        return None, None
+    ids = np.unique(lab[true & (lab > 0)])
+    if ids.size == 0:
+        return None, None
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * margin + 1, 2 * margin + 1))
+    near = cv2.dilate(true.astype(np.uint8), k) > 0
+    return np.isin(lab, ids), near
+
+
+def bleed_pixels(pred, true, margin_frac=0.02):
+    """pooled over a batch: (pixels bleeding out of the disc's blob, true disc pixels)"""
+    bleed = disc = 0
+    for pr, tr in zip(pred, true):
+        disc += int(tr.sum())
+        blob, near = _disc_blob(pr, tr, _margin_px(tr.shape, margin_frac))
+        if blob is not None:
+            bleed += int((blob & ~near).sum())
+    return bleed, disc
+
+
+def bridge_weights(pred, true, ring_w=1.0, ring_frac=0.15, bridge_w=1.0, bridge_max=3.0, margin_frac=0.02):
+    """per-pixel BCE weights (N, H, W) float32 from the thresholded prediction and the true mask"""
+    import cv2
+    out = np.ones(true.shape, np.float32)
+    for i, (pr, tr) in enumerate(zip(pred, true)):
+        area = int(tr.sum())
+        if area == 0:
+            continue
+        w = out[i]
+        if ring_w > 1:
+            diam = 2 * math.sqrt(area / math.pi)
+            dist = cv2.distanceTransform((~tr).astype(np.uint8), cv2.DIST_L2, 3)
+            ring = np.clip(1 - dist / max(1.0, ring_frac * diam), 0, 1)
+            w[:] = np.where(tr, 1.0, 1 + (ring_w - 1) * ring)
+        if bridge_w > 1:
+            blob, near = _disc_blob(pr, tr, _margin_px(tr.shape, margin_frac))
+            if blob is not None:
+                leak = blob & ~near
+                n_leak = int(leak.sum())
+                if n_leak:
+                    scale = min(bridge_max, 1 + n_leak / area)
+                    w[leak] = np.maximum(w[leak], bridge_w * scale)
+    return out
 
 
 def _font(size=12):
