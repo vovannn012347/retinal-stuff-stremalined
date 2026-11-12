@@ -1,0 +1,17 @@
+# Continue SurgicalSlicing from the accepted x16 definitor with SMALLER cuts (x16 -> x12 -> x9),
+# instead of halving to x8. Separate run folder; the original run stays untouched.
+#   .venv\Scripts\python.exe code_new\train_surgical.py --config code_new\configs\definitor_cpu_from_x16.yaml
+# The slicing registry of the x16 model is carried over (indices stay in the original numbering) and
+# sizes are reported relative to the original full model.
+extends: definitor_cpu.yaml
+
+run:
+  name: definitor_cpu_from_x16
+
+model:
+  init: checkpoint
+  checkpoint: training-runs/definitor_cpu/accepted/cycle_02.pth
+
+surgical:
+  cut_ratio: 0.25           # a quarter per cut, interleaved (positions 2, 6, 10, ...): 16 -> 12 -> 9
+  max_cycles: 2             # at most two such cuts; a failed recovery retries with 0.125, then stops

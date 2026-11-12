@@ -365,11 +365,18 @@ def main():
         if cfg.model.init == 'checkpoint':
             model = task.load_model(resolve_path(cfg.model.checkpoint))
             log(f"model from checkpoint {cfg.model.checkpoint}")
+            ck = torch.load(resolve_path(cfg.model.checkpoint), map_location='cpu', weights_only=False)
+            if isinstance(ck, dict) and ck.get('slicing_registry') is not None:
+                # continue slicing an accepted model: keep its cut history in the ORIGINAL channel numbering
+                registry, channel_map = list(ck['slicing_registry']), dict(ck.get('channel_map') or {})
+                log(f"  continuing its slicing registry: {len(registry)} earlier cut(s)")
         elif cfg.model.init in ('vgg16', 'scratch'):
             model = task.build_model()
         else:
             sys.exit(f"model.init must be vgg16 | checkpoint | scratch, got {cfg.model.init!r}")
         orig_params = count_params(model)
+        if cfg.model.init == 'checkpoint' and isinstance(ck, dict) and ck.get('orig_params'):
+            orig_params = int(ck['orig_params'])     # sizes stay relative to the original full model
     model.to(device)
     opt = make_optimizer(model, cfg, lr)
     scaler = torch.amp.GradScaler(device.type, enabled=use_amp)
