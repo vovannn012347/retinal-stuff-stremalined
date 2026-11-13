@@ -11,6 +11,7 @@ run:
 datasets:
   - name: odir_local_x9_v3              # crops from the x9 definitor (make_classifier_crops.py)
     path: training-data/eye-classifier/odir_local_x9_v3
+    labels: labels_train                # the subset from tools/make_train_subset.py (images/ with these labels)
   # - name: legacy_v0
   #   path: training-data/classifier/datasets/legacy_v0
 
