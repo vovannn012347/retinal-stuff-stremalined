@@ -1,0 +1,129 @@
+КОМАНДИ: ПІДГОТОВКА ДАНИХ І ТРЕНУВАННЯ (дефінітор -> кропи -> класифікатор -> скрипт для ProcessorApplication)
+==========================================================================================================
+
+Усі команди запускаються з кореня репозиторію:
+    D:\Shared\Kursova\processing-scripts\retinal-glaucoma\retinal-stuff-streamlined
+з активованим .venv (у підказці видно "(.venv) PS ..."). Без активації пиши .venv\Scripts\python.exe замість python.exe.
+Перед роботою підтягнути код:
+    git pull
+
+Зупинка будь-якого тренування: Ctrl+C. Стан зберігається після кожного кроку (фолда), тому продовження - та сама
+команда з --resume. Конфіг перечитується при кожному запуску, змінені налаштування підхоплюються.
+Будь-яке налаштування можна змінити на один запуск без правки yaml:  --set gate.recall=0.88  --set surgical.max_cycles=1
+
+
+-----------------------------------------------------------------------------------------------------------
+0. ОДИН РАЗ: СЕТАП
+-----------------------------------------------------------------------------------------------------------
+code_new\setup\setup_laptop_windows.bat
+    Створює .venv і ставить залежності (torch з CUDA, якщо є nvidia-smi; на цьому ПК - CPU).
+python.exe code_new\setup\check_env.py
+    Перевіряє torch / numpy / opencv / Pillow і чи бачить GPU.
+python.exe code_new\tests\test_surgery.py
+    Швидкі тести (вирізання, графи, кропи, ворота). Має закінчитись "ALL OK".
+
+
+-----------------------------------------------------------------------------------------------------------
+1. ДЕФІНІТОР (диск зорового нерва)
+-----------------------------------------------------------------------------------------------------------
+1.1 Підготовка зображень і масок (обрізка чорної рамки, HSV-S + CLAHE-LAB, 512 px):
+python.exe code_new\prepare_definitor_inputs.py
+    Звідки: training-data\source-input\input_for_definitor + training-data\eye-nerve-definitor\training-masks
+    Куди:   training-data\eye-nerve-definitor\prepared_512\ (images\, masks\, prepare.json). Тека щоразу
+            перестворюється.
+
+1.2 Тренування повної моделі + SurgicalSlicing (навчання -> ворота -> ramp dropout -> штраф -> вирізання половини
+    каналів через один -> відновлення -> ...):
+python.exe code_new\train_surgical.py --config code_new\configs\definitor_cpu.yaml
+    Тека прогону: training-runs\definitor_cpu\
+      accepted\cycle_00.pth (x64), cycle_01 (x32), cycle_02 (x16), cycle_03 (x8) - кожна прийнята модель;
+      final_model.pth, log.csv / steps.csv, samples\, worst\, slicing_registry.json.
+    Продовжити після зупинки:
+python.exe code_new\train_surgical.py --config code_new\configs\definitor_cpu.yaml --resume
+
+1.3 Дорізати від x16 меншими кроками (x16 -> x12 -> x9, чверть каналів за цикл):
+python.exe code_new\train_surgical.py --config code_new\configs\definitor_cpu_from_x16.yaml
+    Бере training-runs\definitor_cpu\accepted\cycle_02.pth, пише в training-runs\definitor_cpu_from_x16\.
+    final_model.pth = x9 (базова модель для кропів і для ProcessorApplication).
+
+1.4 (за бажанням) Прогнати дефінітор по теці фото + бенчмарк швидкості:
+python.exe code_new\run_definitor.py --model training-runs\definitor_cpu_from_x16\final_model.pth --images <тека з фото> --out training-runs\definitor_output --preview-size 0
+    masks\, preview\, islands.csv, no_islands.txt, benchmark.json (час на фото по етапах: network, total ...).
+    Для таблиці в статті: той самий прогін для x64 (definitor_cpu\accepted\cycle_00.pth), x16 (cycle_02.pth), x9.
+
+
+-----------------------------------------------------------------------------------------------------------
+2. КРОПИ ДЛЯ КЛАСИФІКАТОРА
+-----------------------------------------------------------------------------------------------------------
+2.1 Дефінітор по всіх фото -> кожен острівець -> кроп з ОРИГІНАЛЬНОГО фото (1,75 діаметра диска, не менше 0,20
+    ширини сітківки, 256 px) + мітки зі старих файлів:
+python.exe code_new\make_classifier_crops.py --model training-runs\definitor_cpu_from_x16\final_model.pth --images training-data\source-input\odir5kraw\kaggle-images --labels training-data\source-input\odir5kraw\retina_classify\nerves_cropped_out_labels --out training-data\eye-classifier\odir_local_x9_v3
+    images\<фото>_<k>.png, labels\<фото>_<k>.png.csv (glaucoma, atrophy = максимум зі старих файлів фото;
+    valid_image = 1), crops.csv (статус, fallback, enlarged ...), no_islands.txt, benchmark.json.
+    Повторний запуск у ту саму теку НЕ перезаписує вже наявні мітки (твої правки зберігаються);
+    --overwrite-labels - почати мітки наново.
+
+2.2 Перегляд фото з кількома острівцями (там найчастіше помилки):
+python.exe code_new\tools\collect_multi_islands.py .\training-data\eye-classifier\odir_local_x9_v3\images .\training-data\eye-classifier\odir_local_x9_v3\review
+    Копіює всі кропи фото, де є _0 і ще хоч один (_1, _2 ...), + їхні мітки в review\labels (для перегляду).
+    Альтернатива: code_new\tools\collect_extra_islands.py <images> --out <тека> --with-first --labels
+
+2.3 Розкласти переглянуті кропи за списками (твої скрипти):
+python.exe .\code_new\tools\move_files.py .\code_new\tools\correct_images.txt .\training-data\eye-classifier\odir_local_x9_v3\images\ .\training-data\eye-classifier\odir_local_x9_v3\images_correct\
+python.exe .\code_new\tools\move_files.py .\code_new\tools\correct_images.txt .\training-data\eye-classifier\odir_local_x9_v3\labels\ .\training-data\eye-classifier\odir_local_x9_v3\labels_correct\
+python.exe .\code_new\tools\move_files.py .\code_new\tools\iccorect_images.txt .\training-data\eye-classifier\odir_local_x9_v3\images\ .\training-data\eye-classifier\odir_local_x9_v3\images_iccorect\
+python.exe .\code_new\tools\move_files.py .\code_new\tools\iccorect_images.txt .\training-data\eye-classifier\odir_local_x9_v3\labels\ .\training-data\eye-classifier\odir_local_x9_v3\labels_iccorect\
+    Спершу можна з --dry-run. Список сортується й зберігається назад у .txt.
+
+2.4 Правка міток:
+python.exe .\code_new\tools\nonzero_labels.py .\training-data\eye-classifier\odir_local_x9_v3\labels_iccorect\
+    Показує мітки з glaucoma / atrophy != 0 (у неправильних кропах їх треба обнулити).
+python.exe .\code_new\tools\set_columns_batch.py .\training-data\eye-classifier\odir_local_x9_v3\labels_correct\ --dry-run
+python.exe .\code_new\tools\set_columns_batch.py .\training-data\eye-classifier\odir_local_x9_v3\labels_correct\
+    Значення з UPDATES усередині скрипта (спершу відредагувати словник).
+
+2.5 Повернути виправлені мітки (і кропи) в набір, з перевіркою значень 0..1 і резервною копією:
+python.exe code_new\tools\merge_labels.py training-data\eye-classifier\odir_local_x9_v3 --dry-run
+python.exe code_new\tools\merge_labels.py training-data\eye-classifier\odir_local_x9_v3
+    Бере всі labels_* -> labels\, відсутні кропи з images_* -> images\. Замінені файли -> labels_backup_<час>\.
+    Наприкінці рахує набір: glaucoma>0, atrophy>0, valid=1 / 0 / між.
+
+
+-----------------------------------------------------------------------------------------------------------
+3. КЛАСИФІКАТОР
+-----------------------------------------------------------------------------------------------------------
+3.1 Збалансований тренувальний піднабір (~500 кропів), решта - бенчмарк:
+python.exe code_new\tools\make_train_subset.py training-data\eye-classifier\odir_local_x9_v3 --n 512
+    labels_train\ (тренування), labels_bench\ (бенчмарк), subset.csv. Вибір по пацієнтах (жоден пацієнт не в
+    обох наборах), з кожної категорії в тренування не більше 70 %. Частки: --shares glaucoma=0.3,atrophy=0.25,...
+    Тренер бере ТІЛЬКИ ті зображення з images\, для яких є мітка в labels_train\.
+
+3.2 Тренування (CPU-профіль; ворота: точність >= 0,90, recall > 0,93, специфічність >= 0,85):
+python.exe code_new\train_surgical.py --config code_new\configs\classifier_laptop.yaml
+    Тека: training-runs\classifier_laptop\ (accepted\cycle_XX.pth, final_model.pth, log.csv, mistakes.csv,
+    refined_labels.csv - кропи, з якими мережа найбільше не згодна = кандидати на перевірку міток).
+    Продовжити:
+python.exe code_new\train_surgical.py --config code_new\configs\classifier_laptop.yaml --resume
+    Якщо recall за 10-15 проходів упирається нижче порога - не чекати годинами:
+python.exe code_new\train_surgical.py --config code_new\configs\classifier_laptop.yaml --resume --set gate.recall=0.88
+    або --set gate.mode=plateau (приймає найкращий знімок, коли бал перестає рости).
+
+3.3 Бенчмарк на кропах, що НЕ брали участі в тренуванні (labels_bench, інші пацієнти):
+python.exe code_new\evaluate.py --config code_new\configs\classifier_bench.yaml --model training-runs\classifier_laptop\final_model.pth
+
+
+-----------------------------------------------------------------------------------------------------------
+4. СКРИПТ ДЛЯ PROCESSORAPPLICATION
+-----------------------------------------------------------------------------------------------------------
+python.exe code_new\tools\build_processor_script.py --definitor training-runs\definitor_cpu_from_x16\final_model.pth --classifier training-runs\classifier_laptop\final_model.pth --zip dist\retinal_surgical_analyzer.zip
+    Оновлює code\rt_*.py з code_new\surgical\, кладе ваги у weights\definitor.pth і weights\classifier.pth,
+    пише zip (script_manifest.json у корені архіву). Цей zip - на сторінку провізіонінгу.
+    Тека пакета: code_new\processor_script\retinal_surgical_analyzer\ (README.md - входи / виходи).
+
+
+-----------------------------------------------------------------------------------------------------------
+ДОВІДКА
+-----------------------------------------------------------------------------------------------------------
+python.exe code_new\plot_log.py training-runs\<прогін>        графік log.csv -> log.png
+python.exe code_new\lr_find.py --config <конфіг>              підбір швидкості навчання (тестовий прогін)
+Розміри моделей дефінітора: x64 12,66 M параметрів, x32 3,17 M, x16 0,79 M, x12 0,45 M, x9 0,25 M, x8 0,20 M.
