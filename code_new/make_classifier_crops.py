@@ -98,6 +98,8 @@ def main():
     ap.add_argument('--threshold', type=float, default=None)
     ap.add_argument('--fallback-rel', type=float, default=P.ISLAND_DEFAULTS['fallback_rel'],
                     help='dim photos: if nothing passes the threshold, use this x the photo\'s max probability (0 = off)')
+    ap.add_argument('--min-disc-frac', type=float, default=P.CROP_DEFAULTS['min_disc_frac'],
+                    help='crop diameter never below this x the retina width (small islands = part of a disc)')
     ap.add_argument('--min-area-frac', type=float, default=P.ISLAND_DEFAULTS['min_area_frac'])
     ap.add_argument('--prepare-json', default=None)
     ap.add_argument('--device', default='cpu')
@@ -114,7 +116,7 @@ def main():
     thr = runner.threshold if a.threshold is None else a.threshold
     (out / 'images').mkdir(parents=True, exist_ok=True)
     (out / 'labels').mkdir(parents=True, exist_ok=True)
-    cparams = {'size': a.size, 'margin': a.margin}
+    cparams = {'size': a.size, 'margin': a.margin, 'min_disc_frac': a.min_disc_frac}
 
     rows, missing, empty = [], [], []
     for n, path in enumerate(photos, 1):
@@ -143,6 +145,7 @@ def main():
                          'islands_in_photo': len(islands), 'mean_prob': f"{isl.mean_prob:.3f}", 'fallback': int(isl.fallback),
                          'status': info.status, 'completeness': f"{info.completeness:.3f}",
                          'diameter_px': f"{info.diameter_px:.1f}",
+                         'crop_diameter_px': f"{info.crop_diameter_px:.1f}", 'enlarged': int(info.enlarged),
                          'glaucoma': '' if label is None else label['glaucoma'],
                          'atrophy': '' if label is None else label['atrophy'],
                          'valid_image': '' if label is None else label['valid_image'],
@@ -156,7 +159,9 @@ def main():
     (out / 'missing_labels.txt').write_text('\n'.join(missing), encoding='utf-8')
     (out / 'no_islands.txt').write_text('\n'.join(empty), encoding='utf-8')
     extra = sum(1 for r in rows if r['island'] > 0)
+    enl = sum(1 for r in rows if r['enlarged'])
     print(f"done: {len(rows)} crops ({extra} from second/third islands - check those first), "
+          f"{enl} crops enlarged to the minimum disc size, "
           f"{len(missing)} photos without labels, {len(empty)} without islands -> {out}")
 
 

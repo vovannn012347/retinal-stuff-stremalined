@@ -28,6 +28,11 @@ from . import enhance as E
 
 PREPARE_DEFAULTS = {'hsv_s': True, 'clahe': True, 'clip_limit': 2.0, 'tile': 16, 'black_level': 10,
                     'crop_to_retina': True, 'size': 512}
+# A detected island can be only part of the disc (dim photo, partial response); its own diameter would then
+# give a crop that cuts the disc. The crop diameter is therefore never smaller than min_disc_frac x the
+# retina's width. Measured on the hand-drawn training masks (retina width = 1): disc diameter 0.12 - 0.41,
+# median 0.22 (14 masks); 0.15 is below almost every real disc, so only partial islands get enlarged.
+CROP_DEFAULTS = {'min_disc_frac': 0.15}
 ISLAND_DEFAULTS = {'threshold': 0.5, 'open_frac': 0.03, 'min_area_frac': 0.0005, 'fallback_rel': 0.5,
                    'fallback_floor': 0.05}
 
@@ -139,8 +144,19 @@ def _islands(prob, thr, open_frac, min_area_frac) -> List[Island]:
 
 
 def crop_island(rgb: np.ndarray, isl: Island, params: Optional[dict] = None):
-    """(DiscInfo, uint8 RGB crop or None) for one island, cut from the original photo."""
-    p = {**C.DEFAULTS, **(params or {}), 'open_frac': 0.0}     # the island is already cleaned
+    """(DiscInfo, uint8 RGB crop or None) for one island, cut from the original photo.
+    info.diameter_px stays the detected diameter; info.crop_diameter_px is the one the crop used
+    (at least min_disc_frac x the retina width), info.enlarged says whether it had to be raised."""
+    from dataclasses import replace
+    p = {**C.DEFAULTS, **CROP_DEFAULTS, **(params or {}), 'open_frac': 0.0}     # the island is already cleaned
     info = C.analyse(rgb, isl.mask.astype(np.uint8) * 255, p)
-    img, _ = C.crop(rgb, info, p)
+    info.crop_diameter_px, info.enlarged = info.diameter_px, False
+    if info.status == 'no_disc':
+        return info, None
+    box = E.retina_box(rgb, int(p.get('black_level', 10)))
+    if box is not None and p['min_disc_frac'] > 0:
+        d_min = p['min_disc_frac'] * max(box[2] - box[0], box[3] - box[1])
+        if not (info.diameter_px >= d_min):
+            info.crop_diameter_px, info.enlarged = d_min, True
+    img, _ = C.crop(rgb, replace(info, diameter_px=info.crop_diameter_px), p)
     return info, img

@@ -39,6 +39,8 @@ def main():
     ap.add_argument('--open-frac', type=float, default=P.ISLAND_DEFAULTS['open_frac'])
     ap.add_argument('--fallback-rel', type=float, default=P.ISLAND_DEFAULTS['fallback_rel'],
                     help='dim photos: if nothing passes the threshold, use this x the photo\'s max probability (0 = off)')
+    ap.add_argument('--min-disc-frac', type=float, default=P.CROP_DEFAULTS['min_disc_frac'],
+                    help='crop diameter never below this x the retina width (small islands = part of a disc)')
     ap.add_argument('--min-area-frac', type=float, default=P.ISLAND_DEFAULTS['min_area_frac'],
                     help='smallest island, as a fraction of the photo area')
     ap.add_argument('--preview-size', type=int, default=256, help='0 = no previews')
@@ -64,10 +66,11 @@ def main():
         union = np.zeros(prob.shape, np.uint8)
         for i in isl:
             union[i.mask] = 255
-            info, _ = P.crop_island(rgb, i)
+            info, _ = P.crop_island(rgb, i, {'min_disc_frac': a.min_disc_frac})
             rows.append({'image': path.name, 'island': i.index, 'area_px': i.area_px,
                          'mean_prob': f"{i.mean_prob:.3f}", 'fallback': int(i.fallback), 'center_x': f"{info.center_x:.1f}",
                          'center_y': f"{info.center_y:.1f}", 'diameter_px': f"{info.diameter_px:.1f}",
+                         'crop_diameter_px': f"{info.crop_diameter_px:.1f}", 'enlarged': int(info.enlarged),
                          'status': info.status, 'completeness': f"{info.completeness:.3f}",
                          'solidity': f"{info.solidity:.3f}"})
         if not isl:
@@ -84,7 +87,7 @@ def main():
 
     with open(out / 'islands.csv', 'w', encoding='utf-8-sig', newline='') as f:
         w = csv.DictWriter(f, fieldnames=['image', 'island', 'area_px', 'mean_prob', 'fallback', 'center_x', 'center_y',
-                                          'diameter_px', 'status', 'completeness', 'solidity'])
+                                          'diameter_px', 'crop_diameter_px', 'enlarged', 'status', 'completeness', 'solidity'])
         w.writeheader(); w.writerows(rows)
     (out / 'no_islands.txt').write_text('\n'.join(empty), encoding='utf-8')
     per = {}
