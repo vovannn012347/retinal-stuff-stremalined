@@ -8,7 +8,9 @@ they are - fix the label files in the dataset's labels/ folder, not the copies.
 
 Options:
     --min N        photos with at least N crops (default 2)
-    --labels DIR   also copy the matching label files (<crop>.csv) into <out>/labels for reference
+    --labels DIR   label folder (default: the 'labels' folder next to src, if it exists); the matching
+                   label files (<crop>.csv) are copied into <out>/labels for reference
+    --no-labels    do not copy labels
     --move         move instead of copy (careful: the trainer then no longer sees those crops)
 """
 import argparse
@@ -28,6 +30,7 @@ def main():
     ap.add_argument('out', help='review folder (created)')
     ap.add_argument('--min', type=int, default=2, help='at least this many crops per photo')
     ap.add_argument('--labels', default=None, help='labels folder to copy matching <crop>.csv files from')
+    ap.add_argument('--no-labels', action='store_true')
     ap.add_argument('--move', action='store_true')
     a = ap.parse_args()
 
@@ -42,11 +45,15 @@ def main():
                 groups[m.group(1)][int(m.group(2))] = f
     picked = {k: v for k, v in groups.items() if 0 in v and len(v) >= a.min}
     out.mkdir(parents=True, exist_ok=True)
-    lbl_src = Path(a.labels) if a.labels else None
+    lbl_src = Path(a.labels) if a.labels else src.parent / 'labels'
+    if a.no_labels or not lbl_src.is_dir():
+        if a.labels:
+            sys.exit(f"labels folder not found: {lbl_src}")
+        lbl_src = None
     if lbl_src:
         (out / 'labels').mkdir(exist_ok=True)
     op = shutil.move if a.move else shutil.copy2
-    n = 0
+    n = n_lbl = 0
     for stem in sorted(picked):
         for k in sorted(picked[stem]):
             f = picked[stem][k]
@@ -56,8 +63,13 @@ def main():
                 lf = lbl_src / (f.name + '.csv')
                 if lf.is_file():
                     shutil.copy2(lf, out / 'labels' / lf.name)
+                    n_lbl += 1
     (out / 'photos.txt').write_text('\n'.join(sorted(picked)), encoding='utf-8')
     print(f"{len(picked)} photos with >= {a.min} crops, {n} files {'moved' if a.move else 'copied'} -> {out}")
+    if lbl_src:
+        print(f"{n_lbl} label files copied from {lbl_src} -> {out / 'labels'} (edit the originals, not these)")
+    else:
+        print("no labels folder found next to the images - pass --labels <folder>")
 
 
 if __name__ == '__main__':
