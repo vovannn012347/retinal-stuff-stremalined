@@ -1,6 +1,6 @@
 """Inference pipeline: original fundus photo -> definitor -> disc candidates (islands) -> disc crops.
 
-    runner = DefinitorRunner('training-runs/definitor_cpu/accepted/cycle_02.pth')
+    runner = DefinitorRunner('training-runs/definitor_cpu_from_x16/final_model.pth')
     prob = runner.probability(rgb)              # float32 [H, W] at the photo's own resolution
     for isl in find_islands(prob):              # every candidate, largest first
         info, crop = crop_island(rgb, isl)      # crop from the ORIGINAL photo (no CLAHE)

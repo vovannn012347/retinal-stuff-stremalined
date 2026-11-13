@@ -1,6 +1,6 @@
 """Run a trained definitor over a folder of ORIGINAL fundus photos (no preparation needed).
 
-    python code_new/run_definitor.py --model training-runs/definitor_cpu/accepted/cycle_02.pth ^
+    python code_new/run_definitor.py --model training-runs/definitor_cpu_from_x16/final_model.pth ^
         --images artifacts/retina_images_prepared/kaggle-images --out training-runs/definitor_output
 
 Output (<out>/):

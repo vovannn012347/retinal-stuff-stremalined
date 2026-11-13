@@ -1,7 +1,7 @@
 """Classifier dataset from original photos: definitor -> every disc candidate (island) -> crop + label.
 
     python code_new/make_classifier_crops.py ^
-        --model  training-runs/definitor_cpu/accepted/cycle_02.pth ^
+        --model  training-runs/definitor_cpu_from_x16/final_model.pth ^
         --images artifacts/retina_images_prepared/kaggle-images ^
         --labels artifacts/retina_images_prepared/retina_classify/nerves_cropped_out_labels ^
         --out    training-data/eye-classifier/odir_local_v2

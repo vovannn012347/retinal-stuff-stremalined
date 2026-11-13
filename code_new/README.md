@@ -146,13 +146,13 @@ python code_new/evaluate.py --config <конфіг> --model .../final_model.pth 
 
 1. **Дефінітор по теці фото** (перевірка, маски всіх «острівців»):
    ```
-   .venv\Scripts\python.exe code_new\run_definitor.py --model training-runs\definitor_cpu\accepted\cycle_02.pth --images <тека з фото> --out training-runs\definitor_output
+   .venv\Scripts\python.exe code_new\run_definitor.py --model training-runs\definitor_cpu_from_x16\final_model.pth --images <тека з фото> --out training-runs\definitor_output
    ```
    `masks\` (усі острівці, роздільність фото), `preview\` (фото | ймовірність), `islands.csv`, `no_islands.txt`.
    Фото подаються оригінальні: підготовка (рамка сітківки, HSV-S + CLAHE-LAB, 512 px) робиться так само, як для навчання (`surgical/pipeline.py`).
 2. **Кропи + мітки для класифікатора**:
    ```
-   .venv\Scripts\python.exe code_new\make_classifier_crops.py --model training-runs\definitor_cpu\accepted\cycle_02.pth --images artifacts\retina_images_prepared\kaggle-images --labels artifacts\retina_images_prepared\retina_classify\nerves_cropped_out_labels --out training-data\eye-classifier\odir_local_v2
+   .venv\Scripts\python.exe code_new\make_classifier_crops.py --model training-runs\definitor_cpu_from_x16\final_model.pth --images artifacts\retina_images_prepared\kaggle-images --labels artifacts\retina_images_prepared\retina_classify\nerves_cropped_out_labels --out training-data\eye-classifier\odir_local_v2
    ```
    Кожен острівець (до 3, найбільший перший) → кроп з **оригінального** фото (без CLAHE), сторона = 1,75 діаметра диска, 256 px.
    Мітки: старі файли `<фото>_<n>.<ext>.csv` фото поєднуються — glaucoma і atrophy беруть найбільше значення (старі кропи з valid_image = 0 не враховуються, якщо є інші), valid_image = 1 для всіх кропів.
