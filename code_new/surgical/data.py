@@ -6,6 +6,7 @@ Fold rotation (the training method):
   * a pass = all K folds trained once; then the fold order is shuffled;
   * after `passes_per_dataset` passes the next dataset in the list is used.
 """
+import csv
 import hashlib
 import json
 import random
@@ -149,6 +150,85 @@ class ImageStore:
 def to_input(img_u8: torch.Tensor) -> torch.Tensor:
     """uint8 [C,H,W] -> float normalised to [-1, 1] (same as the old trainers)."""
     return img_u8.float().div_(127.5).sub_(1.0)
+
+
+# ── Label learning (soft bootstrapping) ───────────────────────────────────────────────
+class LabelLearner:
+    """Moves each sample's TRAINING target slowly from the given label towards what the network says,
+    using only out-of-fold predictions (the "test on the next fold" step, before the network has
+    trained on that sample in this pass) - so a sample never confirms its own memorised answer.
+
+        target <- target + rate * (prediction - target)            (space: prob)
+        logit(target) <- ... same in log-odds                        (space: logodds, a binary Bayes filter)
+
+    The target never moves further than max_shift from the given label. Metrics and the gate always
+    use the GIVEN labels; only the loss sees the moved targets. refined_labels.csv lists the samples
+    whose target moved most - the candidates for correcting the label file by hand."""
+
+    def __init__(self, cfg, order):
+        cfg = cfg or {}
+        self.enabled = bool(cfg.get('enabled', False))
+        self.rate = float(cfg.get('rate', 0.01))
+        self.start_pass = int(cfg.get('start_pass', 10))
+        self.max_shift = float(cfg.get('max_shift', 0.5))
+        self.space = str(cfg.get('space', 'prob'))
+        # after_accept: targets only start moving once a model has passed the gate on the GIVEN labels
+        # (before that the network's opinion is not worth anything and would drag the targets along)
+        self.after_accept = str(cfg.get('start', 'after_accept')) == 'after_accept'
+        self.active = not self.after_accept
+        self.order = list(order)
+        names = cfg.get('labels') or self.order
+        self.cols = [self.order.index(n) for n in names if n in self.order]
+        self.soft: Dict[str, np.ndarray] = {}
+        self.n_upd: Dict[str, int] = {}
+
+    def target(self, s: 'Sample') -> np.ndarray:
+        t = self.soft.get(s.path)
+        return s.labels if t is None else t
+
+    def update(self, samples: List['Sample'], probs: np.ndarray, total_passes: int):
+        if not self.enabled or not self.active or total_passes < self.start_pass:
+            return
+        eps = 1e-3
+        for s, p in zip(samples, probs):
+            t = self.soft.get(s.path, s.labels.astype(np.float32)).copy()
+            for j in self.cols:
+                if self.space == 'logodds':
+                    tt, pp = np.clip([t[j], p[j]], eps, 1 - eps)
+                    lt, lp = np.log(tt / (1 - tt)), np.log(pp / (1 - pp))
+                    v = 1 / (1 + np.exp(-(lt + self.rate * (lp - lt))))
+                else:
+                    v = t[j] + self.rate * (p[j] - t[j])
+                lo, hi = s.labels[j] - self.max_shift, s.labels[j] + self.max_shift
+                t[j] = float(np.clip(v, max(0.0, lo), min(1.0, hi)))
+            self.soft[s.path] = t
+            self.n_upd[s.path] = self.n_upd.get(s.path, 0) + 1
+
+    def write_csv(self, path: Path, samples: List['Sample']):
+        by = {s.path: s for s in samples}
+        rows = []
+        for k, t in self.soft.items():
+            s = by.get(k)
+            if s is None:
+                continue
+            d = np.abs(t - s.labels)
+            rows.append((float(d.max()), Path(k).name, s.labels, t, self.n_upd.get(k, 0)))
+        rows.sort(key=lambda r: -r[0])
+        with open(path, 'w', encoding='utf-8-sig', newline='') as f:
+            w = csv.writer(f)
+            w.writerow(['image', 'max_shift'] + [f'{n}_given' for n in self.order]
+                       + [f'{n}_learned' for n in self.order] + ['updates'])
+            for d, name, g, t, nu in rows:
+                w.writerow([name, f"{d:.3f}"] + [f"{v:.2f}" for v in g] + [f"{v:.3f}" for v in t] + [nu])
+
+    def state_dict(self):
+        return {'soft': {k: v.tolist() for k, v in self.soft.items()}, 'n_upd': dict(self.n_upd),
+                'active': self.active}
+
+    def load_state_dict(self, d):
+        self.soft = {k: np.asarray(v, np.float32) for k, v in (d or {}).get('soft', {}).items()}
+        self.n_upd = dict((d or {}).get('n_upd', {}))
+        self.active = bool((d or {}).get('active', self.active))
 
 
 # ── Mistake replay ────────────────────────────────────────────────────────────────────

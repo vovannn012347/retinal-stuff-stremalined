@@ -138,10 +138,13 @@ class ClassifierTask:
             raise ValueError(f"preprocess.mode must be stretch | pad | center_crop, got {self.mode!r}")
         return _resize_u8(img, self.size)
 
+    label_learner = None          # set by the trainer (labels.learning): moved training targets
+
     def item(self, img, s, train):
         if train and self.augment is not None:
             img = self.augment(img)
-        return D.to_input(img), torch.from_numpy(s.labels)
+        y = self.label_learner.target(s) if (train and self.label_learner is not None) else s.labels
+        return D.to_input(img), torch.from_numpy(np.asarray(y, np.float32))
 
     # model
     def build_model(self):
@@ -196,16 +199,19 @@ class ClassifierTask:
         g = self.cfg.gate
         acc, rec = m['gate_main'], m['gate_recall']
         rec_ok = math.isnan(rec) or rec > g['recall']
-        passed = not math.isnan(acc) and acc >= g['accuracy'] and rec_ok
+        spec, min_spec = m.get('specificity', float('nan')), g.get('specificity')
+        spec_ok = min_spec is None or math.isnan(spec) or spec >= float(min_spec)
+        passed = not math.isnan(acc) and acc >= g['accuracy'] and rec_ok and spec_ok
         tol = g.get('degrade_tolerance', 0.02)
         degraded = math.isnan(acc) or acc < g['accuracy'] - tol or (not math.isnan(rec) and rec < g['recall'] - tol)
         return passed, degraded
 
     def metric_fields(self):
-        return ['acc', 'recall'] + [f'{n}_{k}' for n in self.order for k in ('acc', 'recall')]
+        return ['acc', 'recall', 'specificity'] + [f'{n}_{k}' for n in self.order
+                                                   for k in ('acc', 'recall', 'specificity')]
 
     def short(self, m):
-        return f"acc {_f(m.get('acc'))} recall {_f(m.get('recall'))}"
+        return f"acc {_f(m.get('acc'))} recall {_f(m.get('recall'))} specificity {_f(m.get('specificity'))}"
 
     def render_samples(self, *args, **kwargs):          # classifier: no image samples
         return
@@ -231,11 +237,14 @@ class _ClsAcc:
             m[f'{n}_acc'] = (tp + tn) / max(1, tp + tn + fp + fn)
             m[f'{n}_recall'] = tp / (tp + fn) if tp + fn else float('nan')
             m[f'{n}_precision'] = tp / (tp + fp) if tp + fp else float('nan')
+            m[f'{n}_specificity'] = tn / (tn + fp) if tn + fp else float('nan')
             m[f'{n}_pos'] = tp + fn
         accs = [m[f'{n}_acc'] for n in g.accuracy_labels if f'{n}_acc' in m]
         recs = [m[f'{n}_recall'] for n in g.recall_labels if not math.isnan(m.get(f'{n}_recall', float('nan')))]
         m['acc'] = float(np.mean(accs)) if accs else float('nan')
         m['recall'] = float(min(recs)) if recs else float('nan')
+        spec = [m[f'{n}_specificity'] for n in g.recall_labels if not math.isnan(m.get(f'{n}_specificity', float('nan')))]
+        m['specificity'] = float(min(spec)) if spec else float('nan')
         m['gate_main'], m['gate_recall'] = m['acc'], m['recall']
         return m
 

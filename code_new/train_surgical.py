@@ -144,7 +144,9 @@ class Bundle:
     def set_batch(self, bs):
         self.batch_size = bs
         nw = int(self.cfg.training.num_workers)
-        common = dict(batch_size=bs, num_workers=nw, pin_memory=self.device.type == 'cuda', persistent_workers=nw > 0)
+        # label learning changes the training targets between steps: workers must be restarted to see them
+        persistent = nw > 0 and getattr(self.task, 'label_learner', None) is None
+        common = dict(batch_size=bs, num_workers=nw, pin_memory=self.device.type == 'cuda', persistent_workers=persistent)
         self.train_loader = DataLoader(D_dataset(self.samples, self.store, self.task, True),
                                        sampler=self.train_sampler, **common)
         self.eval_loader = DataLoader(D_dataset(self.samples, self.store, self.task, False),
@@ -229,7 +231,7 @@ def train_fold(model, task, b, indices, opt, scaler, device, use_amp, cfg, pass_
 
 
 @torch.no_grad()
-def evaluate(model, task, b, indices, device, use_amp, acc, tracker=None, per_image=None):
+def evaluate(model, task, b, indices, device, use_amp, acc, tracker=None, per_image=None, learner=None, passes=0):
     """Adds predictions to `acc`; per-sample errors go to the mistake tracker; per-image results are
     appended to `per_image` as (sample index, dict) if a list is given. Returns mean loss."""
     model.eval()
@@ -247,6 +249,8 @@ def evaluate(model, task, b, indices, device, use_amp, acc, tracker=None, per_im
             errs += task.sample_error(logits, y).tolist()
         if per_image is not None:
             per_image += list(zip(idx.tolist(), task.per_image(logits, y)))
+        if learner is not None and learner.enabled:
+            learner.update([b.samples[i] for i in idx.tolist()], torch.sigmoid(logits.float()).cpu().numpy(), passes)
     if tracker is not None:
         tracker.update(paths, errs)
     return float(np.mean(losses)) if losses else float('nan')
@@ -310,6 +314,10 @@ def main():
     rotation = D.FoldRotation(len(datasets), int(cfg.folds.k), int(cfg.folds.passes_per_dataset), int(cfg.run.seed))
     schedule = SurgicalSchedule(sc)
     tracker = D.MistakeTracker(cfg.get('replay', {}))
+    learner = D.LabelLearner(cfg.labels.get('learning', {}) if task.name == 'classifier' else {},
+                             getattr(task, 'order', []))
+    if learner.enabled:
+        task.label_learner = learner
     selection, pass_info, pass_buf = {}, None, {'loss': [], 'extra': 0}
     registry, channel_map = [], {}  # slicing registry: every cut, in current and original channel numbering
     last_accepted, orig_params, step = None, None, 0
@@ -336,6 +344,7 @@ def main():
         model = load_from_state(st)
         rotation.load_state_dict(st['rotation']); schedule.load_state_dict(st['schedule'])
         tracker.load_state_dict(st.get('tracker', {}))
+        learner.load_state_dict(st.get('label_learner', {}))
         selection, pass_info, pass_buf = st['selection'], st['pass_info'], st['pass_buf']
         last_accepted, orig_params, step, lr = st['last_accepted'], st['orig_params'], st['step'], st['lr']
         accepted_lr = st.get('accepted_lr', lr)
@@ -412,7 +421,7 @@ def main():
         atomic_save({'model_class': type(model).__name__, 'arch': model.arch(), 'model': model.state_dict(),
                      'optimizer': opt.state_dict(), 'scaler': scaler.state_dict() if use_amp else None,
                      'rotation': rotation.state_dict(), 'schedule': schedule.state_dict(),
-                     'tracker': tracker.state_dict(), 'selection': selection, 'pass_info': pass_info,
+                     'tracker': tracker.state_dict(), 'label_learner': learner.state_dict(), 'selection': selection, 'pass_info': pass_info,
                      'pass_buf': pass_buf, 'last_accepted': last_accepted, 'orig_params': orig_params,
                      'step': step, 'lr': lr, 'accepted_lr': accepted_lr, 'phys_batch': phys_batch, 'accum': accum,
                      'plateau': plateau, 'lr_steps': lrc.steps, 'pg': pg, 'accepted_score': accepted_score,
@@ -574,7 +583,9 @@ def main():
                     log(f"[memory] out of memory -> batch {phys_batch} x {accum} accumulation "
                         f"(same {phys_batch * accum} per optimizer step); repeating this step")
             step_acc = task.new_accumulator()
-            test_loss = evaluate(model, task, b, b.folds[te_f], device, use_amp, _Both(step_acc, fold_acc), tracker)
+            test_loss = evaluate(model, task, b, b.folds[te_f], device, use_amp, _Both(step_acc, fold_acc), tracker,
+                                 learner=learner if schedule.phase == 'learn' else None,   # not while the ramp degrades on purpose
+                                 passes=rotation.total_passes)
             sm = step_acc.result()
             pass_buf['loss'].append(loss); pass_buf['extra'] += extra
             pass_buf.setdefault('tloss', []).append(test_loss)
@@ -657,6 +668,8 @@ def main():
                              sel_norm_ratio=sel_ratio, action=action,
                              **{f'fold_{k}': fm.get(k) for k in mf}, **{f'test_{k}': tm.get(k) for k in mf})
                 tracker.write_csv(run_dir / 'mistakes.csv')
+                if learner.enabled and learner.soft:
+                    learner.write_csv(run_dir / 'refined_labels.csv', b.samples)
                 write_worst(b, f"pass_{rotation.total_passes:04d}")
                 every = int(cfg.logging.get('sample_every_passes', 1))
                 if every > 0 and rotation.total_passes % every == 0:
@@ -691,6 +704,9 @@ def main():
                                   f"ACCEPTED cycle {schedule.cycle}, pass {rotation.total_passes}, params {params:,}")
                     write_worst(b, f"accepted_cycle_{schedule.cycle:02d}", force=True)
                     schedule.after_accept()
+                    if learner.enabled and not learner.active:
+                        learner.active = True
+                        log("label learning starts now (first model accepted on the given labels)")
                     log(f"[cycle {schedule.cycle}] ACCEPTED -> {path.name} ({params:,} params, "
                         f"{params / orig_params:.1%} of start)")
                     if schedule.cycle >= int(sc.max_cycles):

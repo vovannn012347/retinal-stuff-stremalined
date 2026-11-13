@@ -7,9 +7,10 @@ run:
 
 # Each dataset = a folder with images/ and labels/ (labels/<image file name>.csv,
 # header glaucoma,atrophy,valid_image). The list is cycled every folds.passes_per_dataset passes.
+# Made by make_classifier_crops.py (definitor -> every island -> crop from the ORIGINAL photo, no CLAHE).
 datasets:
-  - name: odir_local_v1
-    path: training-data/classifier/datasets/odir_local_v1
+  - name: odir_local_v2
+    path: training-data/classifier/datasets/odir_local_v2
   # - name: legacy_v0
   #   path: training-data/classifier/datasets/legacy_v0
 
@@ -17,6 +18,20 @@ labels:
   order: [glaucoma, atrophy, valid_image]
   positive_threshold: 0.5               # target >= this counts as positive (0.5 = "suspected")
   group_regex: null                     # patient key override (regex with one group)
+  # Label learning (soft bootstrapping): the TRAINING target of every crop moves slowly from the given
+  # label towards the network's out-of-fold prediction (the 'test on the next fold' step, never a
+  # prediction on an image it has just trained on). Gate and metrics always use the given labels.
+  # refined_labels.csv (run folder) lists the crops whose target moved most = label files to re-check.
+  learning:
+    enabled: true
+    labels: [glaucoma, atrophy]         # which outputs may move (valid_image: correct by hand)
+    rate: 0.01                          # per out-of-fold look = per pass: after 50 passes a confident
+                                        #   disagreement has moved the target ~40 % of the way
+    start: after_accept                 # after_accept: only once a model passed the gate on the given
+                                        #   labels (its opinion is worth something) | pass: from start_pass
+    start_pass: 10
+    max_shift: 0.4                      # never further than this from the given label (1.0 stays >= 0.6)
+    space: prob                         # prob | logodds (binary Bayes filter form)
 
 preprocess:
   size: 128
@@ -48,7 +63,9 @@ training:
 
 gate:                                   # checked on the mean of the last 5 passes (gate.mode average)
   accuracy: 0.90                        # mean per-label accuracy over accuracy_labels
-  recall: 0.95                          # recall must be > this, min over recall_labels
+  recall: 0.93                          # recall must be > this, min over recall_labels (early glaucoma!)
+  specificity: 0.85                     # healthy crops must not be flagged: TN / (TN + FP) >= this,
+                                        #   min over recall_labels (the cost of false alarms)
   accuracy_labels: [glaucoma, atrophy, valid_image]
   recall_labels: [glaucoma, atrophy]
 

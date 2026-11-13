@@ -93,6 +93,7 @@ device: {{use_cuda_if_available: false}}
 datasets:
   - {{name: ds_a, path: {tmp / 'ds_a'}}}
   - {{name: ds_b, path: {tmp / 'ds_b'}}}
+labels: {{learning: {{enabled: true, start_pass: 3, rate: 0.05}}}}
 preprocess: {{size: 32}}
 augmentation: {{randaug_magnitude: 0, rotation_degrees: 0, color_jitter: [0, 0, 0, 0]}}
 folds: {{k: 3, passes_per_dataset: 3, test_fraction: 0.1}}
@@ -116,6 +117,9 @@ logging: {{print_every_steps: 1000}}
     assert run([CODE / 'evaluate.py', '--config', cfg, '--model', rd / 'final_model.pth',
                 '--split', rd / 'split_ds_a.json'], tmp) == 0
     assert run([CODE / 'plot_log.py', rd], tmp) == 0
+    rl = list(csv.DictReader(open(rd / 'refined_labels.csv', encoding='utf-8-sig')))
+    assert rl and int(rl[0]['updates']) > 0, 'label learning did not run'
+    print(f"label learning: {len(rl)} targets tracked, largest shift {rl[0]['max_shift']}")
     print("CLASSIFIER SMOKE OK")
 
 

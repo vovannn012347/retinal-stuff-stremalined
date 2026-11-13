@@ -142,6 +142,26 @@ python code_new/evaluate.py --config <конфіг> --model .../final_model.pth 
 ```
 Для definitor з `--images` пише маски в `--out`; для classifier друкує ймовірності.
 
+## 3а. Класифікатор: від дефінітора до кропів
+
+1. **Дефінітор по теці фото** (перевірка, маски всіх «острівців»):
+   ```
+   .venv\Scripts\python.exe code_new\run_definitor.py --model training-runs\definitor_cpu\accepted\cycle_02.pth --images <тека з фото> --out training-runs\definitor_output
+   ```
+   `masks\` (усі острівці, роздільність фото), `preview\` (фото | ймовірність), `islands.csv`, `no_islands.txt`.
+   Фото подаються оригінальні: підготовка (рамка сітківки, HSV-S + CLAHE-LAB, 512 px) робиться так само, як для навчання (`surgical/pipeline.py`).
+2. **Кропи + мітки для класифікатора**:
+   ```
+   .venv\Scripts\python.exe code_new\make_classifier_crops.py --model training-runs\definitor_cpu\accepted\cycle_02.pth --images artifacts\retina_images_prepared\kaggle-images --labels artifacts\retina_images_prepared\retina_classify\nerves_cropped_out_labels --out training-data\classifier\datasets\odir_local_v2
+   ```
+   Кожен острівець (до 3, найбільший перший) → кроп з **оригінального** фото (без CLAHE), сторона = 1,75 діаметра диска, 256 px.
+   Мітки: старі файли `<фото>_<n>.<ext>.csv` фото поєднуються — glaucoma і atrophy беруть найбільше значення (старі кропи з valid_image = 0 не враховуються, якщо є інші), valid_image = 1 для всіх кропів.
+   Переглянути `crops.csv` (спершу острівці 1, 2 і статуси partial / irregular) і виправити мітки неправильних кропів (valid_image = 0, glaucoma = atrophy = 0).
+   Для тек, розкладених за діагнозом (`raw_data\glaucoma`, `raw_data\atrophy`): `--folder-labels` замість `--labels`.
+3. **Навчання**: `train_surgical.py --config code_new\configs\classifier_laptop.yaml` (або `classifier_gpu.yaml`).
+   Ворота: точність ≥ 0,90, recall > 0,93 і специфічність ≥ 0,85 (мін. по glaucoma / atrophy) — ранню глаукому не пропускати, але й за хибні тривоги штраф.
+   **Навчання міток** (`labels.learning`): після першої прийнятої моделі ціль кожного кропа повільно (0,01 за прохід, не далі 0,4 від даної мітки) зсувається до позафолдового передбачення мережі; ворота й метрики завжди за даними мітками. `refined_labels.csv` у теці прогону — кропи, чия ціль зсунулась найбільше: кандидати на ручну перевірку міток.
+
 ## 4. Як працює
 
 ### Згортки
