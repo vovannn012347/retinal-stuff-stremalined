@@ -19,7 +19,8 @@ Output (<out>/, a dataset folder for classifier_*.yaml):
 Labels come from the earlier labelled crops (--labels), named <photo stem>_<n>.<ext>.csv: all files of
 a photo are combined - glaucoma and atrophy take the LARGEST value over its files (a 0.5 "suspected"
 stays 0.5; files of old crops marked valid_image = 0 are ignored unless there is no other) - and
-valid_image is written as 1 for every crop. Go through crops.csv / the images and set
+valid_image is written as 1 for every crop. Re-running into the same --out keeps label files that already
+exist (your corrections), unless --overwrite-labels. Go through crops.csv / the images and set
 valid_image to 0 (and glaucoma/atrophy to 0) for crops that are not the disc.
 --folder-labels instead takes glaucoma / atrophy from the photo's folder name (e.g. raw_data/glaucoma/).
 """
@@ -102,6 +103,9 @@ def main():
                     help='crop diameter never below this x the retina width (small islands = part of a disc)')
     ap.add_argument('--min-area-frac', type=float, default=P.ISLAND_DEFAULTS['min_area_frac'])
     ap.add_argument('--prepare-json', default=None)
+    ap.add_argument('--overwrite-labels', action='store_true',
+                    help='rewrite label files that already exist in <out>/labels (default: keep them - '
+                         'your corrections survive a re-run)')
     ap.add_argument('--device', default='cpu')
     a = ap.parse_args()
 
@@ -137,8 +141,9 @@ def main():
                 continue
             name = f"{path.stem}_{isl.index}.png"
             Image.fromarray(crop).save(out / 'images' / name)
-            if label is not None:
-                (out / 'labels' / (name + '.csv')).write_text(
+            lf = out / 'labels' / (name + '.csv')
+            if label is not None and (a.overwrite_labels or not lf.exists()):
+                lf.write_text(
                     'glaucoma,atrophy,valid_image\n' + ','.join(f"{label[k]:.1f}" for k in ORDER) + '\n',
                     encoding='utf-8')
             rows.append({'crop': name, 'source': str(path.relative_to(img_dir)), 'island': isl.index,
