@@ -9,8 +9,8 @@ run:
 # header glaucoma,atrophy,valid_image). The list is cycled every folds.passes_per_dataset passes.
 # Made by make_classifier_crops.py (definitor -> every island -> crop from the ORIGINAL photo, no CLAHE).
 datasets:
-  - name: odir_local_v2
-    path: training-data/eye-classifier/odir_local_v2
+  - name: odir_local_x9_v3              # crops from the x9 definitor (make_classifier_crops.py)
+    path: training-data/eye-classifier/odir_local_x9_v3
   # - name: legacy_v0
   #   path: training-data/classifier/datasets/legacy_v0
 

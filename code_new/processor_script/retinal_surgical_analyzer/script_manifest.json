@@ -1,0 +1,219 @@
+{
+  "script_id": "glaucoma-retinal-surgical-8DB48F11-7FF5-453D-92F4-19501A16CDE5",
+  "script_label": "glaucoma_retinal_analyzer_surgical",
+  "artifact_hash": "",
+  "version": "2.0.0",
+  "processor_version": "1.0.0",
+  "entry_point": "code/retinal_surgical_main.py",
+  "inputs_mapping": [
+    {
+      "position": 1,
+      "type": "script_file",
+      "disk_path": "code/rt_enhance.py",
+      "label": "rt_enhance"
+    },
+    {
+      "position": 2,
+      "type": "script_file",
+      "disk_path": "code/rt_disc_crop.py",
+      "label": "rt_disc_crop"
+    },
+    {
+      "position": 3,
+      "type": "script_file",
+      "disk_path": "code/rt_definitor_model.py",
+      "label": "rt_definitor_model"
+    },
+    {
+      "position": 4,
+      "type": "script_file",
+      "disk_path": "code/rt_model.py",
+      "label": "rt_model"
+    },
+    {
+      "position": 5,
+      "type": "script_file",
+      "disk_path": "code/rt_pipeline.py",
+      "label": "rt_pipeline"
+    },
+    {
+      "position": 6,
+      "type": "source_file",
+      "disk_path": "weights/definitor.pth",
+      "label": "definitor_model"
+    },
+    {
+      "position": 7,
+      "type": "source_file",
+      "disk_path": "weights/classifier.pth",
+      "label": "classifier_model"
+    },
+    {
+      "position": 8,
+      "type": "multi_file",
+      "label": "retinal_images"
+    },
+    {
+      "position": 9,
+      "type": "decimal",
+      "label": "positive_threshold",
+      "default": 0.5,
+      "min": 0.05,
+      "max": 0.99,
+      "step": 0.05,
+      "optional": true
+    },
+    {
+      "position": 10,
+      "type": "decimal",
+      "label": "suspect_threshold",
+      "default": 0.3,
+      "min": 0.0,
+      "max": 0.95,
+      "step": 0.05,
+      "optional": true
+    },
+    {
+      "position": 11,
+      "type": "decimal",
+      "label": "valid_threshold",
+      "default": 0.5,
+      "min": 0.05,
+      "max": 0.95,
+      "step": 0.05,
+      "optional": true
+    },
+    {
+      "position": 12,
+      "type": "integer",
+      "label": "max_candidates",
+      "default": 3,
+      "min": 1,
+      "max": 5,
+      "step": 1,
+      "optional": true
+    }
+  ],
+  "outputs_mapping": [
+    {
+      "type": "multi_file",
+      "disk_path": "retinal_discs",
+      "label": "retinal_masks_images"
+    },
+    {
+      "type": "file",
+      "disk_path": "retinal_result.json",
+      "label": "retinal_classify_result"
+    },
+    {
+      "type": "integer",
+      "label": "retinal_glaucoma_count"
+    },
+    {
+      "type": "decimal",
+      "label": "retinal_glaucoma_probability_0_1"
+    },
+    {
+      "type": "integer",
+      "label": "retinal_suspected_glaucoma_count"
+    },
+    {
+      "type": "integer",
+      "label": "retinal_atrophy_count"
+    },
+    {
+      "type": "decimal",
+      "label": "retinal_atrophy_probability_0_1"
+    },
+    {
+      "type": "integer",
+      "label": "retinal_retake_count"
+    }
+  ],
+  "orchestrator_input_mapping": [
+    {
+      "type": "multi_file",
+      "label_param": "retinal_images",
+      "text_label": "vovikus.retinal_images"
+    },
+    {
+      "type": "decimal",
+      "label_param": "positive_threshold",
+      "text_label": "vovikus.positive_threshold"
+    },
+    {
+      "type": "decimal",
+      "label_param": "suspect_threshold",
+      "text_label": "vovikus.suspect_threshold"
+    },
+    {
+      "type": "decimal",
+      "label_param": "valid_threshold",
+      "text_label": "vovikus.valid_threshold"
+    },
+    {
+      "type": "integer",
+      "label_param": "max_candidates",
+      "text_label": "vovikus.max_candidates"
+    }
+  ],
+  "orchestrator_output_mapping": [
+    {
+      "type": "multi_file",
+      "label_param": "retinal_masks_images",
+      "text_label": "vovikus.retinal_masks_images"
+    },
+    {
+      "type": "file",
+      "label_param": "retinal_classify_result",
+      "text_label": "vovikus.retinal_classify_result"
+    },
+    {
+      "type": "integer",
+      "label_param": "retinal_glaucoma_count",
+      "text_label": "vovikus.retinal_glaucoma_count"
+    },
+    {
+      "type": "decimal",
+      "label_param": "retinal_glaucoma_probability_0_1",
+      "text_label": "vovikus.retinal_glaucoma_probability_0_1"
+    },
+    {
+      "type": "integer",
+      "label_param": "retinal_suspected_glaucoma_count",
+      "text_label": "vovikus.retinal_suspected_glaucoma_count"
+    },
+    {
+      "type": "integer",
+      "label_param": "retinal_atrophy_count",
+      "text_label": "vovikus.retinal_atrophy_count"
+    },
+    {
+      "type": "decimal",
+      "label_param": "retinal_atrophy_probability_0_1",
+      "text_label": "vovikus.retinal_atrophy_probability_0_1"
+    },
+    {
+      "type": "integer",
+      "label_param": "retinal_retake_count",
+      "text_label": "vovikus.retinal_retake_count"
+    }
+  ],
+  "localization": {
+    "en": "localization_en.json",
+    "en-US": "localization_en.json",
+    "en-GB": "localization_en.json",
+    "uk": "localization_ua.json",
+    "uk-UA": "localization_ua.json"
+  },
+  "metadata": {
+    "category": "medical",
+    "method": "SurgicalSlicing definitor + classifier",
+    "requirements": [
+      "torch==2.3.0",
+      "numpy==1.26.4",
+      "opencv-python==4.9.0.80",
+      "Pillow"
+    ]
+  }
+}

@@ -215,3 +215,46 @@ class Bench:
         return (f"per photo (median of {s['photos_timed']}): " +
                 ', '.join(x for x in (f('total'), f('load'), f('preprocess'), f('network'), f('map_back'),
                                       f('islands'), f('crops')) if x))
+
+
+class ClassifierRunner:
+    """Disc crop (uint8 RGB, any size) -> {label: probability}. Repeats ClassifierTask.load / to_input:
+    stretch to the model's input size (bilinear), scale to [-1, 1], sigmoid per label."""
+
+    def __init__(self, model_path, device='cpu'):
+        from .model import load_model_file
+        self.device = torch.device(device)
+        ck = torch.load(model_path, map_location='cpu', weights_only=False)
+        pp = ck.get('preprocess', {}) if isinstance(ck, dict) else {}
+        self.size = int(pp.get('size', 128))
+        self.mode = str(pp.get('mode', 'stretch'))
+        self.crop_fraction = float(pp.get('crop_fraction', 1.0))
+        self.model = load_model_file(model_path, input_size=self.size).to(self.device).eval()
+        self.order = list(ck.get('label_order', ['glaucoma', 'atrophy', 'valid_image'])) if isinstance(ck, dict) \
+            else ['glaucoma', 'atrophy', 'valid_image']
+        self.threshold = float(ck.get('decision_threshold', 0.5)) if isinstance(ck, dict) else 0.5
+
+    def _prepare(self, rgb: np.ndarray) -> torch.Tensor:
+        img = Image.fromarray(np.ascontiguousarray(rgb[..., :3], dtype=np.uint8))
+        w, h = img.size
+        if self.mode == 'center_crop':
+            side = int(min(w, h) * max(0.05, min(1.0, self.crop_fraction)))
+            l, t = (w - side) // 2, (h - side) // 2
+            img = img.crop((l, t, l + side, t + side))
+        elif self.mode == 'pad':
+            side = max(w, h)
+            c = Image.new('RGB', (side, side)); c.paste(img, ((side - w) // 2, (side - h) // 2)); img = c
+        a = np.asarray(img.resize((self.size, self.size), Image.BILINEAR), dtype=np.uint8)
+        return torch.from_numpy(a.copy()).permute(2, 0, 1).float().div_(127.5).sub_(1.0)
+
+    @torch.no_grad()
+    def predict(self, crops: List[np.ndarray]) -> List[dict]:
+        if not crops:
+            return []
+        x = torch.stack([self._prepare(c) for c in crops]).to(self.device)
+        p = torch.sigmoid(self.model(x).float()).cpu().numpy()
+        return [{n: float(v) for n, v in zip(self.order, row)} for row in p]
+
+    def describe(self) -> dict:
+        return {'params': int(sum(q.numel() for q in self.model.parameters())), 'input_px': self.size,
+                'labels': self.order}

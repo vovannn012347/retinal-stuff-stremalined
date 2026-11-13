@@ -1,0 +1,6 @@
+Copy the trained models here (the file names are fixed by script_manifest.json):
+
+  definitor.pth   <- training-runs\definitor_cpu_from_x16\final_model.pth   (or another accepted\cycle_XX.pth)
+  classifier.pth  <- training-runs\classifier_laptop\final_model.pth        (or another accepted\cycle_XX.pth)
+
+Both are self-describing (architecture, input size, preprocessing, label order, threshold are inside).
