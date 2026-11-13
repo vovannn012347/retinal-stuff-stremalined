@@ -4,7 +4,7 @@
         --model  training-runs/definitor_cpu/accepted/cycle_02.pth ^
         --images artifacts/retina_images_prepared/kaggle-images ^
         --labels artifacts/retina_images_prepared/retina_classify/nerves_cropped_out_labels ^
-        --out    training-data/classifier/datasets/odir_local_v2
+        --out    training-data/eye-classifier/odir_local_v2
 
 Output (<out>/, a dataset folder for classifier_*.yaml):
     images/<stem>_<k>.png          crop k of the photo (k = 0 is the largest island), cut from the ORIGINAL
@@ -96,6 +96,8 @@ def main():
     ap.add_argument('--margin', type=float, default=C.DEFAULTS['margin'], help='crop side = margin x disc diameter')
     ap.add_argument('--max-islands', type=int, default=3, help='at most this many crops per photo (largest first)')
     ap.add_argument('--threshold', type=float, default=None)
+    ap.add_argument('--fallback-rel', type=float, default=P.ISLAND_DEFAULTS['fallback_rel'],
+                    help='dim photos: if nothing passes the threshold, use this x the photo\'s max probability (0 = off)')
     ap.add_argument('--min-area-frac', type=float, default=P.ISLAND_DEFAULTS['min_area_frac'])
     ap.add_argument('--prepare-json', default=None)
     ap.add_argument('--device', default='cpu')
@@ -122,7 +124,7 @@ def main():
             files = by_island.get(path.stem) or exact.get(path.stem) or []
             label, used = combined_label(files), [f.name for f in files]
         rgb = np.asarray(Image.open(path).convert('RGB'))
-        islands = P.find_islands(runner.probability(rgb), thr, None, a.min_area_frac)[:a.max_islands]
+        islands = P.find_islands(runner.probability(rgb), thr, None, a.min_area_frac, a.fallback_rel)[:a.max_islands]
         if not islands:
             empty.append(path.name)
         elif label is None:
@@ -138,7 +140,7 @@ def main():
                     'glaucoma,atrophy,valid_image\n' + ','.join(f"{label[k]:.1f}" for k in ORDER) + '\n',
                     encoding='utf-8')
             rows.append({'crop': name, 'source': str(path.relative_to(img_dir)), 'island': isl.index,
-                         'islands_in_photo': len(islands), 'mean_prob': f"{isl.mean_prob:.3f}",
+                         'islands_in_photo': len(islands), 'mean_prob': f"{isl.mean_prob:.3f}", 'fallback': int(isl.fallback),
                          'status': info.status, 'completeness': f"{info.completeness:.3f}",
                          'diameter_px': f"{info.diameter_px:.1f}",
                          'glaucoma': '' if label is None else label['glaucoma'],

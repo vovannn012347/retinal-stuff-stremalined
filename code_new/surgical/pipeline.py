@@ -28,7 +28,8 @@ from . import enhance as E
 
 PREPARE_DEFAULTS = {'hsv_s': True, 'clahe': True, 'clip_limit': 2.0, 'tile': 16, 'black_level': 10,
                     'crop_to_retina': True, 'size': 512}
-ISLAND_DEFAULTS = {'threshold': 0.5, 'open_frac': 0.03, 'min_area_frac': 0.0005}
+ISLAND_DEFAULTS = {'threshold': 0.5, 'open_frac': 0.03, 'min_area_frac': 0.0005, 'fallback_rel': 0.5,
+                   'fallback_floor': 0.05}
 
 
 class DefinitorRunner:
@@ -87,13 +88,31 @@ class Island:
     mask: np.ndarray               # bool [H, W] at the photo's resolution, holes filled
     area_px: int
     mean_prob: float
+    fallback: bool = False         # found only with the dim-photo threshold
 
 
-def find_islands(prob: np.ndarray, threshold=None, open_frac=None, min_area_frac=None) -> List[Island]:
+def find_islands(prob: np.ndarray, threshold=None, open_frac=None, min_area_frac=None,
+                 fallback_rel=None) -> List[Island]:
     """Every disc candidate: threshold -> opening (cuts thin bridges / specks) -> connected blobs of at
-    least min_area_frac of the photo -> holes filled. Largest first."""
+    least min_area_frac of the photo -> holes filled. Largest first.
+    Fallback for dim photos: if nothing passes the threshold, the photo's own brightest response is used -
+    threshold = fallback_rel x max probability (not below fallback_floor). The disc is usually there,
+    just faint; the extra islands this may bring are rejected by the classifier (valid_image)."""
     d = ISLAND_DEFAULTS
     thr = d['threshold'] if threshold is None else threshold
+    rel = d['fallback_rel'] if fallback_rel is None else fallback_rel
+    out = _islands(prob, thr, open_frac, min_area_frac)
+    if not out and rel and rel > 0:
+        t2 = max(d['fallback_floor'], rel * float(prob.max()))
+        if t2 < thr:
+            out = _islands(prob, t2, open_frac, min_area_frac)
+            for i in out:
+                i.fallback = True
+    return out
+
+
+def _islands(prob, thr, open_frac, min_area_frac) -> List[Island]:
+    d = ISLAND_DEFAULTS
     of = d['open_frac'] if open_frac is None else open_frac
     maf = d['min_area_frac'] if min_area_frac is None else min_area_frac
     m = (prob >= thr).astype(np.uint8)
