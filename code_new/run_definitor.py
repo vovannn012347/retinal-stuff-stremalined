@@ -8,6 +8,9 @@ Output (<out>/):
                                (crop_discs.py and make_classifier_crops.py read these)
     preview/<stem>.png         photo | probability (black 0 .. white 1), small, for a quick look
     islands.csv                one row per island: area, mean probability, centre, diameter, crop status
+    benchmark.json             timing per photo (median / mean / p95, first 2 photos skipped) for load,
+                               preprocessing, network, mapping back, islands; CPU, threads, torch version
+    benchmark_per_photo.csv    the same per photo
     no_islands.txt             photos where nothing was found
 
 The photo goes through exactly the preparation used for training (retina crop, HSV-S + CLAHE-LAB,
@@ -59,10 +62,18 @@ def main():
     print(f"{len(photos)} photos, model input {runner.size} px, threshold {thr}")
 
     rows, empty, t0 = [], [], time.time()
+    bench = P.Bench()
     for n, path in enumerate(photos, 1):
+        ts = time.perf_counter()
         rgb = np.asarray(Image.open(path).convert('RGB'))
-        prob = runner.probability(rgb)
+        tm = {'photo': path.name, 'load': time.perf_counter() - ts, 'width': rgb.shape[1], 'height': rgb.shape[0]}
+        prob = runner.probability(rgb, tm)
+        t1 = time.perf_counter()
         isl = P.find_islands(prob, thr, a.open_frac, a.min_area_frac, a.fallback_rel)
+        tm['islands'] = time.perf_counter() - t1
+        tm['total'] = time.perf_counter() - ts          # load -> islands (no file writing)
+        tm['n_islands'] = len(isl)
+        bench.add(tm)
         union = np.zeros(prob.shape, np.uint8)
         for i in isl:
             union[i.mask] = 255
@@ -85,6 +96,8 @@ def main():
         if n % 20 == 0 or n == len(photos):
             print(f"  {n}/{len(photos)}  ({(time.time() - t0) / n:.2f} s per photo)")
 
+    bs = bench.write(out, {'model': str(a.model), **runner.describe()})
+    print(P.Bench.line(bs) + f"  -> {out / 'benchmark.json'}")
     with open(out / 'islands.csv', 'w', encoding='utf-8-sig', newline='') as f:
         w = csv.DictWriter(f, fieldnames=['image', 'island', 'area_px', 'mean_prob', 'fallback', 'center_x', 'center_y',
                                           'diameter_px', 'crop_diameter_px', 'enlarged', 'status', 'completeness', 'solidity'])

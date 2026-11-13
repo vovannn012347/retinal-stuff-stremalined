@@ -14,6 +14,8 @@ classifier's valid_image output rejects the wrong ones.
 Uses torch, numpy, OpenCV and Pillow only (works with the ProcessorApplication executor: torch 2.3).
 """
 import json
+import platform
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
@@ -54,8 +56,10 @@ class DefinitorRunner:
         self.prep = {**PREPARE_DEFAULTS, **(prepare or {})}
 
     @torch.no_grad()
-    def probability(self, rgb: np.ndarray) -> np.ndarray:
-        """uint8 RGB [H, W, 3] original photo -> disc probability [H, W] float32 (0 outside the retina)."""
+    def probability(self, rgb: np.ndarray, timing: Optional[dict] = None) -> np.ndarray:
+        """uint8 RGB [H, W, 3] original photo -> disc probability [H, W] float32 (0 outside the retina).
+        timing: if a dict is given, the seconds of 'preprocess', 'network' and 'map_back' are written into it."""
+        t0 = time.perf_counter()
         p = self.prep
         rgb = np.ascontiguousarray(rgb[..., :3], dtype=np.uint8)
         H, W = rgb.shape[:2]
@@ -78,13 +82,22 @@ class DefinitorRunner:
             prep = prep.convert('L').convert('RGB')
         a = np.asarray(prep.resize((self.size, self.size), Image.BILINEAR), dtype=np.uint8)
         x = torch.from_numpy(a.copy()).permute(2, 0, 1).float().div_(127.5).sub_(1.0)[None].to(self.device)
+        t1 = time.perf_counter()
         prob = torch.sigmoid(self.model(x).float())[0, 0].cpu().numpy()
+        t2 = time.perf_counter()
         # back: model size -> box2 inside the S x S image -> box1 inside the photo
         bw, bh = box2[2] - box2[0], box2[3] - box2[1]
         p_s = np.zeros((S, S), np.float32)
         p_s[box2[1]:box2[3], box2[0]:box2[2]] = cv2.resize(prob, (bw, bh), interpolation=cv2.INTER_LINEAR)
         out[y0:y1, x0:x1] = cv2.resize(p_s, (x1 - x0, y1 - y0), interpolation=cv2.INTER_LINEAR)
+        if timing is not None:
+            timing.update(preprocess=t1 - t0, network=t2 - t1, map_back=time.perf_counter() - t2)
         return out
+
+    def describe(self) -> dict:
+        return {'params': int(sum(q.numel() for q in self.model.parameters())), 'input_px': self.size,
+                'device': str(self.device), 'torch': torch.__version__, 'torch_threads': torch.get_num_threads(),
+                'cpu': platform.processor() or platform.machine(), 'platform': platform.platform()}
 
 
 @dataclass
@@ -160,3 +173,45 @@ def crop_island(rgb: np.ndarray, isl: Island, params: Optional[dict] = None):
             info.crop_diameter_px, info.enlarged = d_min, True
     img, _ = C.crop(rgb, replace(info, diameter_px=info.crop_diameter_px), p)
     return info, img
+
+
+class Bench:
+    """Per-photo timings (seconds) -> summary. The first `warmup` photos are left out (first-call costs)."""
+    STAGES = ('load', 'preprocess', 'network', 'map_back', 'islands', 'crops', 'total')
+
+    def __init__(self, warmup=2):
+        self.warmup, self.rows = warmup, []
+
+    def add(self, row: dict):
+        self.rows.append(row)
+
+    def summary(self) -> dict:
+        rows = self.rows[self.warmup:] if len(self.rows) > self.warmup else self.rows
+        out = {'photos_timed': len(rows), 'warmup_skipped': len(self.rows) - len(rows)}
+        for k in self.STAGES:
+            v = np.array([r[k] for r in rows if k in r], dtype=np.float64)
+            if len(v):
+                out[k] = {'mean': float(v.mean()), 'median': float(np.median(v)),
+                          'p95': float(np.percentile(v, 95)), 'min': float(v.min()), 'max': float(v.max())}
+        return out
+
+    def write(self, out_dir: Path, info: dict):
+        import csv
+        s = self.summary()
+        (out_dir / 'benchmark.json').write_text(json.dumps({**info, 'timing_s': s}, indent=1), encoding='utf-8')
+        if self.rows:
+            keys = ['photo'] + [k for k in self.STAGES if k in self.rows[0]] + \
+                   [k for k in self.rows[0] if k not in self.STAGES and k != 'photo']
+            with open(out_dir / 'benchmark_per_photo.csv', 'w', encoding='utf-8-sig', newline='') as f:
+                w = csv.DictWriter(f, fieldnames=keys, extrasaction='ignore')
+                w.writeheader()
+                for r in self.rows:
+                    w.writerow({k: (f"{v:.4f}" if isinstance(v, float) else v) for k, v in r.items()})
+        return s
+
+    @staticmethod
+    def line(s: dict) -> str:
+        f = lambda k: f"{k} {s[k]['median'] * 1000:.0f} ms" if k in s else ''      # noqa: E731
+        return (f"per photo (median of {s['photos_timed']}): " +
+                ', '.join(x for x in (f('total'), f('load'), f('preprocess'), f('network'), f('map_back'),
+                                      f('islands'), f('crops')) if x))

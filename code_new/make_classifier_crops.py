@@ -15,6 +15,9 @@ Output (<out>/, a dataset folder for classifier_*.yaml):
     missing_labels.txt             photos that had islands but no label file (their crops get no label
                                    file and are skipped by the trainer until you add one)
     no_islands.txt                 photos where the definitor found nothing
+    benchmark.json                 timing per photo (median / mean / p95): load, preprocessing, network,
+                                   islands, crops + saving; CPU, threads, model size
+    benchmark_per_photo.csv        the same per photo
 
 Labels come from the earlier labelled crops (--labels), named <photo stem>_<n>.<ext>.csv: all files of
 a photo are combined - glaucoma and atrophy take the LARGEST value over its files (a 0.5 "suspected"
@@ -28,6 +31,7 @@ import argparse
 import csv
 import re
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -123,14 +127,21 @@ def main():
     cparams = {'size': a.size, 'margin': a.margin, 'min_disc_frac': a.min_disc_frac}
 
     rows, missing, empty = [], [], []
+    bench = P.Bench()
     for n, path in enumerate(photos, 1):
+        t0 = time.perf_counter()
         if a.folder_labels:
             label, used = folder_label(path, img_dir), ['<folder>']
         else:
             files = by_island.get(path.stem) or exact.get(path.stem) or []
             label, used = combined_label(files), [f.name for f in files]
         rgb = np.asarray(Image.open(path).convert('RGB'))
-        islands = P.find_islands(runner.probability(rgb), thr, None, a.min_area_frac, a.fallback_rel)[:a.max_islands]
+        tm = {'photo': path.name, 'load': time.perf_counter() - t0, 'width': rgb.shape[1], 'height': rgb.shape[0]}
+        prob = runner.probability(rgb, tm)
+        t1 = time.perf_counter()
+        islands = P.find_islands(prob, thr, None, a.min_area_frac, a.fallback_rel)[:a.max_islands]
+        tm['islands'] = time.perf_counter() - t1
+        t2 = time.perf_counter()
         if not islands:
             empty.append(path.name)
         elif label is None:
@@ -155,6 +166,10 @@ def main():
                          'atrophy': '' if label is None else label['atrophy'],
                          'valid_image': '' if label is None else label['valid_image'],
                          'label_files': ' '.join(used)})
+        tm['crops'] = time.perf_counter() - t2          # crop + saving the files
+        tm['total'] = time.perf_counter() - t0
+        tm['n_islands'] = len(islands)
+        bench.add(tm)
         if n % 20 == 0 or n == len(photos):
             print(f"  {n}/{len(photos)} photos, {len(rows)} crops")
 
@@ -163,6 +178,8 @@ def main():
         w.writeheader(); w.writerows(rows)
     (out / 'missing_labels.txt').write_text('\n'.join(missing), encoding='utf-8')
     (out / 'no_islands.txt').write_text('\n'.join(empty), encoding='utf-8')
+    bs = bench.write(out, {'model': str(a.model), **runner.describe()})
+    print(P.Bench.line(bs) + f"  -> {out / 'benchmark.json'}")
     extra = sum(1 for r in rows if r['island'] > 0)
     enl = sum(1 for r in rows if r['enlarged'])
     print(f"done: {len(rows)} crops ({extra} from second/third islands - check those first), "
