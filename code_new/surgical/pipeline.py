@@ -31,8 +31,8 @@ PREPARE_DEFAULTS = {'hsv_s': True, 'clahe': True, 'clip_limit': 2.0, 'tile': 16,
 # A detected island can be only part of the disc (dim photo, partial response); its own diameter would then
 # give a crop that cuts the disc. The crop diameter is therefore never smaller than min_disc_frac x the
 # retina's width. Measured on the hand-drawn training masks (retina width = 1): disc diameter 0.12 - 0.41,
-# median 0.22 (14 masks); 0.15 is below almost every real disc, so only partial islands get enlarged.
-CROP_DEFAULTS = {'min_disc_frac': 0.15}
+# median 0.22 (14 masks); 0.20 (just under the median) is generous: smaller detections are enlarged.
+CROP_DEFAULTS = {'min_disc_frac': 0.20}
 ISLAND_DEFAULTS = {'threshold': 0.5, 'open_frac': 0.03, 'min_area_frac': 0.0005, 'fallback_rel': 0.5,
                    'fallback_floor': 0.05}
 
