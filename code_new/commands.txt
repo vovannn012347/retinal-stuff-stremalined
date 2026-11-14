@@ -93,14 +93,14 @@ python.exe code_new\tools\merge_labels.py training-data\eye-classifier\odir_loca
 3. КЛАСИФІКАТОР
 -----------------------------------------------------------------------------------------------------------
 3.1 Збалансований тренувальний піднабір (~500 кропів), решта - бенчмарк:
-python.exe code_new\tools\make_train_subset.py training-data\eye-classifier\odir_local_x9_v3 --n 512
+python.exe code_new\tools\make_train_subset.py training-data\eye-classifier\odir_local_x9_v3 --n 1500 --max-train-frac 0.8
     labels_train\ (тренування), labels_bench\ (бенчмарк), subset.csv. Вибір по пацієнтах (жоден пацієнт не в
     обох наборах), з кожної категорії в тренування не більше 70 %. Частки: --shares glaucoma=0.3,atrophy=0.25,...
     Тренер бере ТІЛЬКИ ті зображення з images\, для яких є мітка в labels_train\.
 
 3.2 Тренування (CPU-профіль; ворота: точність >= 0,90, recall > 0,93, специфічність >= 0,85):
 python.exe code_new\train_surgical.py --config code_new\configs\classifier_laptop.yaml
-    Тека: training-runs\classifier_laptop\ (accepted\cycle_XX.pth, final_model.pth, log.csv, mistakes.csv,
+    Тека: training-runs\classifier_laptop_v2\ (accepted\cycle_XX.pth, final_model.pth, log.csv, mistakes.csv,
     refined_labels.csv - кропи, з якими мережа найбільше не згодна = кандидати на перевірку міток).
     Продовжити:
 python.exe code_new\train_surgical.py --config code_new\configs\classifier_laptop.yaml --resume
@@ -109,13 +109,13 @@ python.exe code_new\train_surgical.py --config code_new\configs\classifier_lapto
     або --set gate.mode=plateau (приймає найкращий знімок, коли бал перестає рости).
 
 3.3 Бенчмарк на кропах, що НЕ брали участі в тренуванні (labels_bench, інші пацієнти):
-python.exe code_new\evaluate.py --config code_new\configs\classifier_bench.yaml --model training-runs\classifier_laptop\final_model.pth
+python.exe code_new\evaluate.py --config code_new\configs\classifier_bench.yaml --model training-runs\classifier_laptop_v2\final_model.pth
 
 
 -----------------------------------------------------------------------------------------------------------
 4. СКРИПТ ДЛЯ PROCESSORAPPLICATION
 -----------------------------------------------------------------------------------------------------------
-python.exe code_new\tools\build_processor_script.py --definitor training-runs\definitor_cpu_from_x16\final_model.pth --classifier training-runs\classifier_laptop\final_model.pth --zip dist\retinal_surgical_analyzer.zip
+python.exe code_new\tools\build_processor_script.py --definitor training-runs\definitor_cpu_from_x16\final_model.pth --classifier training-runs\classifier_laptop_v2\final_model.pth --zip dist\retinal_surgical_analyzer.zip
     Оновлює code\rt_*.py з code_new\surgical\, кладе ваги у weights\definitor.pth і weights\classifier.pth,
     пише zip (script_manifest.json у корені архіву). Цей zip - на сторінку провізіонінгу.
     Тека пакета: code_new\processor_script\retinal_surgical_analyzer\ (README.md - входи / виходи).

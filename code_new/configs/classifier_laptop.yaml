@@ -2,7 +2,7 @@
 extends: classifier_base.yaml
 
 run:
-  name: classifier_laptop
+  name: classifier_laptop_v2         # v1 (flatten head, average gate) stays in training-runs/classifier_laptop
 
 device:
   use_cuda_if_available: false

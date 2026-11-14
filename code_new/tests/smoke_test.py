@@ -97,7 +97,8 @@ labels: {{learning: {{enabled: true, start_pass: 3, rate: 0.05}}}}
 preprocess: {{size: 32}}
 augmentation: {{randaug_magnitude: 0, rotation_degrees: 0, color_jitter: [0, 0, 0, 0]}}
 folds: {{k: 3, passes_per_dataset: 3, test_fraction: 0.1}}
-model: {{init: scratch, base: 16, hidden: 32}}
+model: {{init: scratch, base: 16, hidden: 32, head: flatten}}
+gate: {{mode: average, recall: 0.93, recall_labels: [glaucoma, atrophy]}}
 training: {{batch_size: 16, effective_batch_size: 16, num_workers: 0, lr: 3.0e-3, new_layers_lr_mult: 1,
            pos_weight: [1.0, 1.0, 1.0], warmup_steps: 5}}
 surgical: {{min_learn_passes: 2, max_learn_passes: 200, max_recover_passes: 60, max_cycles: 2,

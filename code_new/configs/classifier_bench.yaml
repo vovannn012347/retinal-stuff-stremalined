@@ -1,6 +1,6 @@
 # Benchmark of a trained classifier on everything NOT in the training subset (labels_bench from
 # tools/make_train_subset.py - other patients than the training ones):
-#   .venv\Scripts\python.exe code_new\evaluate.py --config code_new\configs\classifier_bench.yaml --model training-runs\classifier_laptop\final_model.pth
+#   .venv\Scripts\python.exe code_new\evaluate.py --config code_new\configs\classifier_bench.yaml --model training-runs\classifier_laptop_v2\final_model.pth
 extends: classifier_laptop.yaml
 
 datasets:
