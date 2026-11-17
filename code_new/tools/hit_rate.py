@@ -3,8 +3,8 @@
 Вирізки:  <crops_dir>/<photo>_<k>.png          (напр. 0_right_0.png)
 Лейбли:   <labels_dir>/<photo>_<k>.png.csv      (glaucoma,atrophy,valid_image)
   valid_image == 1  -> диск видно повністю (влучання)
-  valid_image != 1  -> диск видно неповністю (часткове)
-  немає .csv        -> помилкова вирізка, диска немає (промах)
+  0 < valid_image < 0.5 -> диск видно неповністю (часткове)
+  valid_image == 0 або немає .csv -> помилкова вирізка, диска немає (промах)
 
 Знімок без жодної вирізки береться з benchmark_per_photo.csv (n_islands == 0).
 
@@ -32,9 +32,9 @@ def read_valid(path):
         return None
     r = {k.strip().lower(): v for k, v in rows[0].items()}
     try:
-        return float(r.get("valid_image", "0")) >= 0.5
+        return float(r.get("valid_image", "0"))
     except ValueError:
-        return False
+        return 0.0
 
 photos = defaultdict(lambda: {"crops": 0, "valid": 0, "partial": 0, "missing": 0})
 for fn in sorted(os.listdir(a.crops)):
@@ -50,9 +50,11 @@ for fn in sorted(os.listdir(a.crops)):
         p["missing"] += 1
     else:
         v = read_valid(lab)
-        if v:
+        if v is None or v == 0:      # valid_image = 0: not the disc -> miss
+            p["missing"] += 1
+        elif v >= 0.5:               # whole (or nearly whole) disc -> hit
             p["valid"] += 1
-        else:
+        else:                        # disc partly visible
             p["partial"] += 1
 
 no_cand = []
