@@ -20,7 +20,7 @@ import re
 import sys
 from pathlib import Path
 
-COLUMNS = ["glaucoma", "atrophy"]   # columns that must be 0.0 to be ignored
+COLUMNS = ["valid_image"]   # columns that must be 0.0 to be ignored
 
 
 def natural_key(name: str):
@@ -39,7 +39,7 @@ def check_file(path: Path):
             if col not in row:
                 raise ValueError(f"missing column '{col}'")
             value = float(row[col])
-            if value != 0.0:
+            if value != 0.0 and value != 1:
                 hits[col] = value
     return hits or None
 
